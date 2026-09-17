@@ -1,0 +1,74 @@
+name: 'Code Review Agent'
+description: >-
+  Junie-shaped local-LLM code reviewer. Uses a model-neutral OpenAI-compatible
+  client (local vLLM over Tailscale), read-only repository tools, direct
+  inline comments, and a required final answer tool.
+inputs:
+  github_token:
+    description: 'Repository token with contents:read, pull-requests:write, and issues:write.'
+    required: false
+    default: ${{ github.token }}
+  github_comment_author:
+    description: 'Expected bot login for GitHub App installation tokens; PAT authors are discovered automatically.'
+    required: false
+    default: 'github-actions[bot]'
+  repository_path:
+    description: 'Path to the PR snapshot, relative to GITHUB_WORKSPACE (default workspace root).'
+    required: false
+    default: '.'
+  expected_head_sha:
+    description: 'Optional gate-pinned head SHA; mismatches supersede the run before inference.'
+    required: false
+  llm_base_url:
+    description: 'OpenAI-compatible base URL of the local vLLM endpoint (e.g. http://vllm-host:8000).'
+    required: true
+  llm_model:
+    description: 'Model id served by the endpoint.'
+    required: true
+  llm_api_key:
+    description: 'Optional API key for the endpoint.'
+    required: false
+    default: ''
+  config_path:
+    description: 'Repository configuration file (review focus, include/exclude globs, instructions, severity threshold, suggestions).'
+    required: false
+    default: '.code-review-agent.yml'
+  tool_mode:
+    description: 'auto | tools | structured. auto probes the model and falls back to JSON-schema structured output.'
+    required: false
+    default: 'auto'
+  max_duration_minutes:
+    description: 'Wall-clock budget for the whole review (workflow ceiling; default 20, hard max 120).'
+    required: false
+    default: '20'
+  max_inline_comments:
+    description: 'Per-run inline comment cap (workflow ceiling; default 6, hard max 12).'
+    required: false
+    default: '6'
+  fail_on_severity:
+    description: 'none | medium | high | critical. When set, the job fails if accepted findings meet the threshold.'
+    required: false
+    default: 'none'
+outputs:
+  operational_errors_json:
+    description: 'Structured operational errors; non-empty errors fail the Action.'
+  inline_comments_reused:
+    description: 'Number of same-head matching comments reused.'
+  status:
+    description: 'clean | findings | partial | skipped | failed'
+  findings_count:
+    description: 'Number of accepted findings, including reused, summary-only, or failed deliveries. Ordinary findings have no independent critic.'
+  reviewed_head_sha:
+    description: 'Full SHA of the head commit that was reviewed.'
+  summary_comment_url:
+    description: 'URL of the marker-owned sticky summary comment (empty in local/skipped runs).'
+  coverage_json:
+    description: 'Deterministic file coverage as JSON.'
+  result_path:
+    description: 'Path to the normalized ReviewResult JSON written by the run.'
+runs:
+  using: 'node24'
+  main: 'dist/action.cjs'
+branding:
+  icon: 'search'
+  color: 'blue'

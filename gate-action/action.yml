@@ -1,0 +1,32 @@
+name: 'CRA event gate'
+description: >-
+  Determines whether the calling event is eligible for an automatic review or
+  an authorized /review command. Authorization (collaborator permission check)
+  completes in this action, before any network egress (Tailscale) happens.
+inputs:
+  github_token:
+    description: 'Token for PR metadata and collaborator permission checks.'
+    required: false
+    default: ${{ github.token }}
+  max_duration_minutes:
+    description: 'Review worker budget used to calculate its job safety timeout.'
+    required: false
+    default: '20'
+outputs:
+  approved:
+    description: 'true when the run may proceed'
+  pr_number:
+    description: 'Pull request number when eligible'
+  reason:
+    description: 'Eligibility decision or operational failure reason.'
+  status:
+    description: 'skipped/failed for denied events; empty for approved events.'
+  head_sha:
+    description: 'Authoritative PR head SHA.'
+  base_sha:
+    description: 'Authoritative PR base SHA.'
+  job_timeout_minutes:
+    description: 'Clamped worker duration plus five bootstrap minutes.'
+runs:
+  using: 'node24'
+  main: 'dist/gate.cjs'

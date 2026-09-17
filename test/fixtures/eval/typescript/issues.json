@@ -1,0 +1,14 @@
+{
+  "kind": "planted-bug",
+  "issues": [
+    {
+      "id": "typescript-regression",
+      "file": "src/math.ts",
+      "lines": [
+        2,
+        2
+      ],
+      "description": "add now subtracts the second operand, violating its contract."
+    }
+  ]
+}

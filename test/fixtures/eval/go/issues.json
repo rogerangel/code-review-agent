@@ -1,0 +1,14 @@
+{
+  "kind": "planted-bug",
+  "issues": [
+    {
+      "id": "go-regression",
+      "file": "average.go",
+      "lines": [
+        6,
+        7
+      ],
+      "description": "Removing the empty-input guard makes integer division panic on an empty slice."
+    }
+  ]
+}

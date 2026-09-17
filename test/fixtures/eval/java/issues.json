@@ -1,0 +1,14 @@
+{
+  "kind": "planted-bug",
+  "issues": [
+    {
+      "id": "java-regression",
+      "file": "src/main/java/Lengths.java",
+      "lines": [
+        3,
+        3
+      ],
+      "description": "Removing null handling introduces NullPointerException instead of returning zero."
+    }
+  ]
+}

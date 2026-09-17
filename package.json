@@ -1,0 +1,68 @@
+{
+  "name": "code-review-agent",
+  "version": "0.1.0",
+  "private": true,
+  "repository": { "type": "git", "url": "git+https://github.com/rogerangel/code-review-agent.git" },
+  "bugs": { "url": "https://github.com/rogerangel/code-review-agent/issues" },
+  "homepage": "https://github.com/rogerangel/code-review-agent#readme",
+  "description": "Junie-shaped local-LLM code reviewer: reusable Node 24 GitHub Action + npm CLI with read-only repository tools, direct inline comments, and a required final answer tool.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "code-review-agent": "./dist/cli.js"
+  },
+  "main": "./dist/api.js",
+  "types": "./dist/api.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "action.yml",
+    "gate-action",
+    "LICENSE",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "check:dist": "tsx scripts/check-dist.ts",
+    "check:release": "tsx scripts/check-release.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "eval": "tsx scripts/eval.ts"
+  },
+  "keywords": [
+    "code-review",
+    "github-action",
+    "llm",
+    "vllm",
+    "static-analysis",
+    "cli"
+  ],
+  "dependencies": {
+    "commander": "^12.1.0",
+    "minimatch": "^10.0.1",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.16.0",
+    "@types/node": "^24.0.0",
+    "eslint": "^9.16.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.18.0",
+    "vitest": "^2.1.8"
+  }
+}

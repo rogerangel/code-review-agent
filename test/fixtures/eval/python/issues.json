@@ -1,0 +1,14 @@
+{
+  "kind": "planted-bug",
+  "issues": [
+    {
+      "id": "python-regression",
+      "file": "maths.py",
+      "lines": [
+        2,
+        2
+      ],
+      "description": "Removing the zero-count guard introduces ZeroDivisionError for an empty input."
+    }
+  ]
+}

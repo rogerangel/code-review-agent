@@ -1,0 +1,14 @@
+{
+  "kind": "planted-bug",
+  "issues": [
+    {
+      "id": "dotnet-regression",
+      "file": "Helpers.cs",
+      "lines": [
+        3,
+        3
+      ],
+      "description": "Removing null handling introduces NullReferenceException for a supported null argument."
+    }
+  ]
+}

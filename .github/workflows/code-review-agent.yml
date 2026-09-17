@@ -1,0 +1,184 @@
+# Trusted reviewer source and PR data live in sibling directories.
+# Authorization precedes tailnet access. Nothing from the PR is executed.
+name: code-review-agent (reusable)
+on:
+  workflow_call:
+    inputs:
+      reviewer_repository:
+        description: 'Trusted reviewer owner/repo, configured in the caller workflow.'
+        required: true
+        type: string
+      reviewer_ref:
+        description: 'Trusted reviewer full commit SHA, normally the same SHA as this workflow reference.'
+        required: true
+        type: string
+      llm_base_url:
+        required: true
+        type: string
+      llm_model:
+        required: true
+        type: string
+      github_comment_author:
+        type: string
+        default: 'github-actions[bot]'
+      tailscale_tags:
+        type: string
+        default: 'tag:code-review-agent'
+      config_path:
+        type: string
+        default: '.code-review-agent.yml'
+      tool_mode:
+        type: string
+        default: 'auto'
+      max_duration_minutes:
+        type: number
+        default: 20
+      max_inline_comments:
+        type: number
+        default: 6
+      fail_on_severity:
+        type: string
+        default: 'none'
+    secrets:
+      github_token:
+        description: 'Optional repository token override; defaults to github.token.'
+        required: false
+      llm_api_key:
+        required: false
+      tailscale_client_id:
+        description: 'Tailscale federated identity client ID.'
+        required: true
+      tailscale_audience:
+        description: 'Tailscale federated identity audience.'
+        required: true
+    outputs:
+      status:
+        value: ${{ jobs.review.outputs.status || jobs.gate.outputs.status }}
+      findings_count:
+        value: ${{ jobs.review.outputs.findings_count || '0' }}
+      reviewed_head_sha:
+        value: ${{ jobs.review.outputs.reviewed_head_sha }}
+      summary_comment_url:
+        value: ${{ jobs.review.outputs.summary_comment_url }}
+      coverage_json:
+        value: ${{ jobs.review.outputs.coverage_json }}
+      operational_errors_json:
+        value: ${{ jobs.review.outputs.operational_errors_json }}
+      inline_comments_reused:
+        value: ${{ jobs.review.outputs.inline_comments_reused || '0' }}
+      result_path:
+        description: 'Ephemeral review-job-local path; not accessible from another job.'
+        value: ${{ jobs.review.outputs.result_path }}
+
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      approved: ${{ steps.gate.outputs.approved }}
+      pr_number: ${{ steps.gate.outputs.pr_number }}
+      head_sha: ${{ steps.gate.outputs.head_sha }}
+      base_sha: ${{ steps.gate.outputs.base_sha }}
+      status: ${{ steps.gate.outputs.status }}
+      job_timeout_minutes: ${{ steps.gate.outputs.job_timeout_minutes }}
+    steps:
+      - name: Validate trusted source reference
+        env:
+          REVIEWER_REPOSITORY: ${{ inputs.reviewer_repository }}
+          REVIEWER_REF: ${{ inputs.reviewer_ref }}
+        run: >-
+          node -e 'if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(process.env.REVIEWER_REPOSITORY)
+          || !/^[a-f0-9]{40}$/.test(process.env.REVIEWER_REF)) process.exit(1)'
+      - name: Checkout trusted reviewer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs.reviewer_repository }}
+          ref: ${{ inputs.reviewer_ref }}
+          token: ${{ secrets.github_token || github.token }}
+          path: reviewer
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Authorize event
+        id: gate
+        uses: ./reviewer/gate-action
+        with:
+          github_token: ${{ secrets.github_token || github.token }}
+          max_duration_minutes: ${{ inputs.max_duration_minutes }}
+
+  review:
+    needs: gate
+    if: needs.gate.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(needs.gate.outputs.job_timeout_minutes) }}
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    concurrency:
+      group: code-review-agent-${{ github.repository }}-${{ needs.gate.outputs.pr_number }}
+      cancel-in-progress: true
+    outputs:
+      status: ${{ steps.review.outputs.status }}
+      findings_count: ${{ steps.review.outputs.findings_count }}
+      reviewed_head_sha: ${{ steps.review.outputs.reviewed_head_sha }}
+      summary_comment_url: ${{ steps.review.outputs.summary_comment_url }}
+      coverage_json: ${{ steps.review.outputs.coverage_json }}
+      operational_errors_json: ${{ steps.review.outputs.operational_errors_json }}
+      inline_comments_reused: ${{ steps.review.outputs.inline_comments_reused }}
+      result_path: ${{ steps.review.outputs.result_path }}
+    steps:
+      - name: Checkout trusted reviewer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs.reviewer_repository }}
+          ref: ${{ inputs.reviewer_ref }}
+          token: ${{ secrets.github_token || github.token }}
+          path: reviewer
+          persist-credentials: false
+      - name: Checkout caller PR snapshot
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ needs.gate.outputs.pr_number }}/head
+          path: review-target
+          fetch-depth: 1
+          persist-credentials: false
+          token: ${{ secrets.github_token || github.token }}
+      - name: Verify gate-pinned snapshot
+        id: snapshot
+        env:
+          EXPECTED_HEAD: ${{ needs.gate.outputs.head_sha }}
+        working-directory: review-target
+        run: >-
+          node -e 'const fs=require("node:fs"),{execFileSync}=require("node:child_process");
+          const current=execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,"current="+String(current===process.env.EXPECTED_HEAD)+"\n");
+          if(current!==process.env.EXPECTED_HEAD)console.log("PR head moved; snapshot superseded before tailnet connection")'
+      - name: Connect authorized runner to tailnet
+        if: steps.snapshot.outputs.current == 'true'
+        uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
+        with:
+          oauth-client-id: ${{ secrets.tailscale_client_id }}
+          audience: ${{ secrets.tailscale_audience }}
+          tags: ${{ inputs.tailscale_tags }}
+      - name: Review snapshot
+        id: review
+        uses: ./reviewer
+        with:
+          repository_path: review-target
+          expected_head_sha: ${{ needs.gate.outputs.head_sha }}
+          github_token: ${{ secrets.github_token || github.token }}
+          github_comment_author: ${{ inputs.github_comment_author }}
+          llm_base_url: ${{ inputs.llm_base_url }}
+          llm_model: ${{ inputs.llm_model }}
+          llm_api_key: ${{ secrets.llm_api_key }}
+          config_path: ${{ inputs.config_path }}
+          tool_mode: ${{ inputs.tool_mode }}
+          max_duration_minutes: ${{ inputs.max_duration_minutes }}
+          max_inline_comments: ${{ inputs.max_inline_comments }}
+          fail_on_severity: ${{ inputs.fail_on_severity }}

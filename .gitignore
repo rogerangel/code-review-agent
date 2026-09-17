@@ -1,0 +1,12 @@
+node_modules/
+.idea/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+.code-review-agent/cache/
+.code-review-agent/traces/
+eval-report-*.json
+*.tgz
+coverage/
+.DS_Store
