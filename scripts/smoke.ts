@@ -1,4 +1,4 @@
-/** No live GitHub/LLM calls. Both Node Actions must work without node_modules. */
+/** No live GitHub/LLM calls. Package installation may fetch npm dependencies. */
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -31,8 +31,10 @@ try {
   const packed = JSON.parse(run('npm', ['pack', '--json', '--ignore-scripts', '--pack-destination', temporary], root)) as { filename: string }[];
   const installDir = path.join(temporary, 'installed');
   await fs.mkdir(installDir);
-  // CI's npm ci warms this cache. No package scripts or live service calls.
-  run('npm', ['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', installDir,
+  // npm ci can cache tarballs without the registry metadata a consumer install needs.
+  // Use a fresh, isolated cache so a warm developer cache cannot hide install failures.
+  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund',
+    '--cache', path.join(temporary, 'npm-cache'), '--prefix', installDir,
     path.join(temporary, packed[0]!.filename)], installDir);
   const version = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
   assert.equal(run('node', [path.join(installDir, 'node_modules/code-review-agent/dist/cli.js'), '--version'], installDir).trim(), version);
@@ -44,4 +46,3 @@ try {
   // Explicit directory from mkdtemp; no workspace or user data is removed.
   await fs.rm(temporary, { recursive: true, force: true });
 }
-

@@ -34,7 +34,7 @@ jobs:
       # Only when the inference endpoint requires a key:
       # llm_api_key: ${{ secrets.CRA_LLM_API_KEY }}
       # Optional token override:
-      # github_token: ${{ secrets.CR_AGENT_TOKEN }}
+      # repository_token: ${{ secrets.CR_AGENT_TOKEN }}
 ~~~
 
 Merge this caller workflow onto the target repository's default branch for issue_comment /review support. Use normal pull_request, not pull_request_target. Do not execute PR scripts before connecting to the tailnet.
@@ -47,7 +47,7 @@ The default github.token is enough for ordinary repos with writable Actions toke
 
 - tailscale_client_id / tailscale_audience map to a federated identity configured for the CALLER repository and the pinned reusable workflow. They are identifiers, not an OAuth secret; stored as repository secrets here for convenient passing.
 - llm_api_key is a workflow secret, never a with input on the caller job.
-- github_token is optional. A fine-grained PAT/App installation token needs target Contents read, Pull requests read/write, and Issues read/write. If reviewer source is made private, it also needs reviewer Contents read and suitable GitHub reusable-workflow access settings.
+- repository_token is optional. A fine-grained PAT/App installation token needs target Contents read, Pull requests read/write, and Issues read/write. If reviewer source is made private, it also needs reviewer Contents read and suitable GitHub reusable-workflow access settings. The reusable-workflow secret cannot be named github_token because GitHub reserves that name; the standalone Action's github_token input is unchanged.
 - Custom App tokens need github_comment_author set to that App's bot login, e.g. my-reviewer[bot]. Installation tokens cannot use GET /user; ownership uses the trusted hint. PAT logins are discovered automatically.
 
 Set these separately in each caller repo, or use organization secrets restricted to your chosen repos. [Tailscale setup](tailscale.md) explains tag/issuer/claim restrictions.

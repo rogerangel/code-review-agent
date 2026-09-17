@@ -40,7 +40,7 @@ on:
         type: string
         default: 'none'
     secrets:
-      github_token:
+      repository_token:
         description: 'Optional repository token override; defaults to github.token.'
         required: false
       llm_api_key:
@@ -98,7 +98,7 @@ jobs:
         with:
           repository: ${{ inputs.reviewer_repository }}
           ref: ${{ inputs.reviewer_ref }}
-          token: ${{ secrets.github_token || github.token }}
+          token: ${{ secrets.repository_token || github.token }}
           path: reviewer
           fetch-depth: 1
           persist-credentials: false
@@ -106,7 +106,7 @@ jobs:
         id: gate
         uses: ./reviewer/gate-action
         with:
-          github_token: ${{ secrets.github_token || github.token }}
+          github_token: ${{ secrets.repository_token || github.token }}
           max_duration_minutes: ${{ inputs.max_duration_minutes }}
 
   review:
@@ -137,7 +137,7 @@ jobs:
         with:
           repository: ${{ inputs.reviewer_repository }}
           ref: ${{ inputs.reviewer_ref }}
-          token: ${{ secrets.github_token || github.token }}
+          token: ${{ secrets.repository_token || github.token }}
           path: reviewer
           persist-credentials: false
       - name: Checkout caller PR snapshot
@@ -148,7 +148,7 @@ jobs:
           path: review-target
           fetch-depth: 1
           persist-credentials: false
-          token: ${{ secrets.github_token || github.token }}
+          token: ${{ secrets.repository_token || github.token }}
       - name: Verify gate-pinned snapshot
         id: snapshot
         env:
@@ -172,7 +172,7 @@ jobs:
         with:
           repository_path: review-target
           expected_head_sha: ${{ needs.gate.outputs.head_sha }}
-          github_token: ${{ secrets.github_token || github.token }}
+          github_token: ${{ secrets.repository_token || github.token }}
           github_comment_author: ${{ inputs.github_comment_author }}
           llm_base_url: ${{ inputs.llm_base_url }}
           llm_model: ${{ inputs.llm_model }}
