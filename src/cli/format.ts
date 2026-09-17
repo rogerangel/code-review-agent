@@ -45,6 +45,12 @@ function toTerminal(r: ReviewResult): string {
       `${r.callCounts.inlineCommentsPosted} posted, ${r.callCounts.inlineCommentsRejected} rejected`,
   );
   if (r.statusReason) lines.push(`  reason:   ${r.statusReason}`);
+  if (r.performance) {
+    const calls = r.performance.llmCalls;
+    const withUsage = calls.filter((call) => call.completionTokens !== undefined);
+    lines.push(`  limits:   ${calls.filter((call) => call.outcome === 'truncated').length} truncated responses, ${r.performance.transcriptCompactions} transcript compactions`);
+    if (withUsage.length) lines.push(`  tokens:   ${withUsage.reduce((sum, call) => sum + call.completionTokens!, 0)} reported completion tokens (usage ${withUsage.length}/${calls.length} calls)`);
+  }
   if (r.findings.length > 0) {
     lines.push('');
     lines.push('Findings:');

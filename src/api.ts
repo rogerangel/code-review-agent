@@ -21,9 +21,12 @@ export {
   stepSchema,
   type ChatMessage,
   type ChatResponse,
+  type ChatRequest,
   type ToolSpec,
   type LLMClientOptions,
 } from './core/llm/client.js';
+export { parseGenerationOptions, validateGenerationOptions, applyGenerationPolicy,
+  type GenerationOptions, type LlmPhase, type TemplateScalar } from './core/llm/generation.js';
 export { probeModel, decideToolMode, type ProbeResult } from './core/llm/doctor.js';
 
 // git / diff
@@ -97,6 +100,7 @@ export {
 export {
   answerTool,
   completeReviewBatchTool,
+  completeReviewFileTool,
   validateAnswer,
   AnswerError,
   type AnswerPayload,

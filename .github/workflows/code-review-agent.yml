@@ -18,6 +18,9 @@ on:
       llm_model:
         required: true
         type: string
+      llm_options:
+        type: string
+        default: '{}'
       github_comment_author:
         type: string
         default: 'github-actions[bot]'
@@ -176,6 +179,7 @@ jobs:
           github_comment_author: ${{ inputs.github_comment_author }}
           llm_base_url: ${{ inputs.llm_base_url }}
           llm_model: ${{ inputs.llm_model }}
+          llm_options: ${{ inputs.llm_options }}
           llm_api_key: ${{ secrets.llm_api_key }}
           config_path: ${{ inputs.config_path }}
           tool_mode: ${{ inputs.tool_mode }}

@@ -10,6 +10,7 @@ import { BudgetTracker } from '../src/core/review/budget.js';
 import { resolveTarget, buildDiff } from '../src/core/diff/git.js';
 import { makeBranchRepo, commitAll } from '../test/helpers/repos.js';
 import { DEFAULT_CONFIG } from '../src/core/config.js';
+import { parseGenerationOptions, type GenerationOptions } from '../src/core/llm/generation.js';
 import { aggregate, scoreCase, type EvaluationCase, type Judgment, type PlantedIssue } from './eval-metrics.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,6 +28,7 @@ interface EvaluationReport {
   schema: 'code-review-agent.eval/v1'; model: string; mode?: string; startedAt: string;
   server: { modelRevision?: string; vllmVersion?: string; toolParser?: string };
   cases: EvaluationCase[]; metrics?: ReturnType<typeof aggregate>;
+  generation?: Omit<GenerationOptions, 'chatTemplateKwargs'> & { thinkingEnabled?: boolean };
 }
 const args = process.argv.slice(2);
 function flag(name: string): string | undefined {
@@ -54,9 +56,12 @@ async function main() {
     const model = process.env.CRA_LLM_MODEL ?? process.env.OPENAI_MODEL;
     if (!baseUrl || !model) throw new Error('set CRA_LLM_BASE_URL and CRA_LLM_MODEL first');
     const apiKey = process.env.CRA_LLM_API_KEY ?? process.env.OPENAI_API_KEY;
+    const generation = parseGenerationOptions(process.env.CRA_LLM_OPTIONS);
+    const { chatTemplateKwargs, ...numericSettings } = generation;
     report = { schema: 'code-review-agent.eval/v1', model, startedAt: new Date().toISOString(),
       server: { modelRevision: process.env.CRA_EVAL_MODEL_REVISION, vllmVersion: process.env.CRA_EVAL_VLLM_VERSION,
-        toolParser: process.env.CRA_EVAL_TOOL_PARSER }, cases: [] };
+        toolParser: process.env.CRA_EVAL_TOOL_PARSER }, cases: [], generation: { ...numericSettings,
+        ...(typeof chatTemplateKwargs?.enable_thinking === 'boolean' ? { thinkingEnabled: chatTemplateKwargs.enable_thinking } : {}) } };
     for (const [fixtureSet, kind] of [['repos', 'clean-control'], ['eval', 'planted-bug']] as const) {
       const directory = path.join(root, 'test/fixtures', fixtureSet);
       const languages = (await fs.readdir(directory, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
@@ -76,11 +81,11 @@ async function main() {
           const target = await resolveTarget(repo.dir, { target: 'main...feature' }, { budget });
           const diff = await buildDiff(repo.dir, target, { budget });
           const llm = new OpenAICompatibleClient({ baseUrl, model, apiKey, budget });
-          item.result = await runReview({ repoDir: repo.dir, target, budget, llm, mode: 'structured', sink: new LocalSink(),
+          item.result = await runReview({ repoDir: repo.dir, target, budget, llm, generation, mode: 'structured', sink: new LocalSink(),
             options: { configPath: '.code-review-agent.yml', toolMode: 'auto', maxDurationMinutes: 20,
               maxInlineComments: 6, failOnSeverity: 'none', config: DEFAULT_CONFIG },
             prepare: async (counted) => {
-              const probe = await probeModel({ model, chat: counted.chat, listModels: () => budget.run((signal) => llm.listModels(signal)) });
+              const probe = await probeModel({ model, chat: counted.chat, listModels: () => budget.run((signal) => llm.listModels(signal)) }, generation);
               const decision = decideToolMode(probe, 'auto');
               report.mode = decision.mode;
               return { mode: decision.mode };

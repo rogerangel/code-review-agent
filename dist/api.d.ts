@@ -19,6 +19,22 @@ declare class BudgetTracker {
     get totalMs(): number;
 }
 
+type LlmPhase = 'probe' | 'planning' | 'review' | 'suggestion-critic' | 'summary';
+type TemplateScalar = string | number | boolean | null;
+interface GenerationOptions {
+    maxOutputTokens?: number;
+    thinkingTokenBudget?: number;
+    chatTemplateKwargs?: Record<string, TemplateScalar>;
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    presencePenalty?: number;
+}
+declare function validateGenerationOptions(options?: GenerationOptions): GenerationOptions;
+declare function parseGenerationOptions(raw?: string): GenerationOptions;
+/** Called by the host, before both real clients and programmatic adapters. */
+declare function applyGenerationPolicy(request: ChatRequest, options?: GenerationOptions): ChatRequest;
+
 /**
  * Model-neutral OpenAI-compatible chat client.
  *
@@ -26,7 +42,7 @@ declare class BudgetTracker {
  * hosts reached over Tailscale). Handles:
  *  - native tool calling (tool_calls) with defensive argument parsing
  *  - JSON-schema structured output (vLLM guided decoding) as a fallback
- *  - reasoning separation: `reasoning_content` is never replayed into the
+ *  - reasoning separation: `reasoning` / `reasoning_content` are never replayed into the
  *    transcript and never mixed into tool arguments
  *
  * The API key is held only in this module and in outgoing headers; it is
@@ -58,8 +74,10 @@ interface ChatResponse {
     reasoning?: string;
     finishReason?: string;
     usage?: {
-        promptTokens: number;
-        completionTokens: number;
+        promptTokens?: number;
+        completionTokens?: number;
+        reasoningTokens?: number;
+        cachedPromptTokens?: number;
     };
 }
 interface ChatRequest {
@@ -77,6 +95,13 @@ interface ChatRequest {
     };
     temperature?: number;
     maxTokens?: number;
+    /** Host-only metadata, never serialized to the inference API. */
+    phase?: LlmPhase;
+    thinkingTokenBudget?: number;
+    chatTemplateKwargs?: Record<string, TemplateScalar>;
+    topP?: number;
+    topK?: number;
+    presencePenalty?: number;
     signal?: AbortSignal;
 }
 /**
@@ -320,9 +345,13 @@ declare class GitRefView implements RepoView {
 }
 declare class WorkTreeView implements RepoView {
     private readonly root;
+    private readonly execution;
     kind: "worktree";
     readonly label: string;
-    constructor(root: string, label?: string);
+    private discovery?;
+    constructor(root: string, label?: string, execution?: GitExecutionOptions);
+    private discoveryFiles;
+    private checkBudget;
     private abs;
     private safeAbs;
     exists(p: string): Promise<boolean>;
@@ -497,7 +526,49 @@ interface ReviewResult {
     callCounts: CallCounts;
     /** URL of the sticky summary comment (GitHub mode). */
     summaryCommentUrl?: string;
+    /** Numeric diagnostics only; never prompts, reasoning text or configuration values. */
+    performance?: PerformanceDiagnostics;
 }
+interface LlmCallMetric {
+    index: number;
+    phase: LlmPhase;
+    batchIndex?: number;
+    durationMs: number;
+    maxOutputTokens: number;
+    thinkingTokenBudget?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
+    cachedPromptTokens?: number;
+    reasoningChars?: number;
+    finishReason?: string;
+    outcome: 'completed' | 'truncated' | 'error' | 'aborted';
+}
+interface PerformanceDiagnostics {
+    llmCalls: LlmCallMetric[];
+    transcriptCompactions: number;
+    toolResultChars: number;
+}
+type ReviewProgressEvent = {
+    type: 'call-start';
+    index: number;
+    phase: LlmCallMetric['phase'];
+    batchIndex?: number;
+    elapsedMs: number;
+} | {
+    type: 'call-end';
+    metric: LlmCallMetric;
+    elapsedMs: number;
+} | {
+    type: 'file-completed';
+    file: string;
+    batchIndex: number;
+    elapsedMs: number;
+} | {
+    type: 'transcript-compacted';
+    count: number;
+    elapsedMs: number;
+};
 interface RepoConfig {
     /** Review focus areas (freeform strings fed into the prompt). */
     focus: string[];
@@ -555,6 +626,15 @@ interface ToolContext {
     findings: Finding[];
     operationalErrors: OperationalError[];
     diffReads: Set<string>;
+    diffReadPages?: Map<string, Set<number>>;
+    /** Explicit per-file checkpoints survive an interrupted batch. */
+    fileCompletions?: Map<string, {
+        summary: string;
+        batchIndex: number;
+    }>;
+    performance?: PerformanceDiagnostics;
+    onProgress?: (event: ReviewProgressEvent) => void;
+    generation?: GenerationOptions;
     batchFiles: string[];
     batchCompletion?: {
         reviewedFiles: string[];
@@ -602,6 +682,8 @@ interface PipelineInputs {
         title: string;
         description: string;
     };
+    generation?: GenerationOptions;
+    onProgress?: (event: ReviewProgressEvent) => void;
     /** Runs inside the same deadline/result handling, using the counted, bounded client. */
     prepare?: (llm: LlmClient) => Promise<{
         mode?: 'tools' | 'structured';
@@ -793,14 +875,14 @@ interface ProbeResult {
     /** JSON-schema structured output produced a valid object. */
     structuredOk: boolean;
     /**
-     * Reasoning separation: when the model emits reasoning_content, the
+     * Reasoning separation: when the model emits a normalized reasoning field, the
      * visible content is not contaminated with tool-call JSON.
      */
     reasoningSeparated: boolean | null;
     details: string[];
     fatalError?: string;
 }
-declare function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 'chat' | 'listModels'>): Promise<ProbeResult>;
+declare function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 'chat' | 'listModels'>, generation?: GenerationOptions): Promise<ProbeResult>;
 /** Decide the tool mode to use for a review given a probe. */
 declare function decideToolMode(probe: ProbeResult, requested: 'auto' | 'tools' | 'structured'): {
     mode: 'tools' | 'structured';
@@ -970,6 +1052,7 @@ interface AnswerPayload {
         reason: string;
     }[];
 }
+declare const completeReviewFileTool: Tool;
 declare const completeReviewBatchTool: Tool;
 declare class AnswerError extends Error {
     constructor(message: string);
@@ -1000,6 +1083,7 @@ declare const TOOL_NAMES: {
     readonly listDirectory: "list_directory";
     readonly search: "search";
     readonly postInlineReviewComment: "post_inline_review_comment";
+    readonly completeReviewFile: "complete_review_file";
     readonly completeReviewBatch: "complete_review_batch";
     readonly answer: "answer";
 };
@@ -1166,6 +1250,8 @@ declare const LIMITS: {
     readonly maxDurationMinutesHard: 120;
     /** Default run duration budget in minutes. */
     readonly maxDurationMinutesDefault: 20;
+    /** Local CLI defaults can accommodate slower private inference. */
+    readonly maxDurationMinutesLocalDefault: 60;
     /** Maximum bytes read from a single file. */
     readonly maxFileBytes: number;
     /** Maximum lines read from a single file. */
@@ -1174,6 +1260,12 @@ declare const LIMITS: {
     readonly maxDiffCharsPerFile: 200000;
     /** Maximum search results returned per call. */
     readonly maxSearchResults: 200;
+    readonly maxToolResultChars: 16000;
+    readonly maxSearchSnippetChars: 512;
+    readonly maxReadFileLinesPerCall: 200;
+    readonly transcriptCompactChars: 120000;
+    readonly maxTranscriptChars: 200000;
+    readonly maxOutputTokensHard: 16384;
     /** Maximum instruction bytes per file. */
     readonly maxInstructionBytesPerFile: 20000;
     /** Maximum total instruction bytes. */
@@ -1199,4 +1291,4 @@ declare const LIMITS: {
  */
 declare function clampResource(value: number, defaultValue: number, hardMax: number): number;
 
-export { ANSWER_TOOL_SPEC, AnswerError, type AnswerPayload, BATCH_TOOL_NAMES, BATCH_TOOL_SPECS, type BatchRunOutcome, type BlockResolution, BudgetExceededError, BudgetTracker, type CallCounts, type ChangedFile, type ChatMessage, type ChatResponse, ConfigError, type Coverage, type CriticVerdict, DEFAULT_CONFIG, DEFAULT_EXCLUDE_RULES, type DiffHunk, type DiffLine, type DiffMap, type Eligibility, type ExcludeKind, type FailOnSeverity, type FileCoverage, type FileCoverageStatus, type FileStatus, type Finding, GitError, type GitExecutionOptions, type GitHubApi, GitHubClient, GitHubError, GitHubSink, GitRefView, type GitTarget, type HeadCheck, IndexView, type InstructionBlock, LIMITS, type LLMClientOptions, LLMError, LocalSink, OpenAICompatibleClient, type OperationalError, type Permission, type PipelineInputs, type PlanResult, type PostState, type ProbeResult, type PullInfo, REVIEW_MARKER_PREFIX, REVIEW_MARKER_SUFFIX, type RepoConfig, type RepoView, type ResolvedOptions, type ReviewBatch, type ReviewCommentInfo, type ReviewCommentParams, type ReviewResult, type ReviewSink, type ReviewStatus, SEVERITIES, SEVERITY_RANK, type SearchOptions, type Severity, SupersededReviewError, TOOL_NAMES, type TargetArgs, TargetError, type Tool, type ToolCall, type ToolContext, type ToolMode, ToolRegistry, type ToolResult, type ToolSpec, ViewError, WorkTreeView, answerTool, basename, batchSystemPrompt, batchUserPrompt, buildDiff, buildDiffMap, buildSummaryBody, clampResource, classifyAll, classifyFile, classifyPath, completeReviewBatchTool, decideToolMode, detectDefaultBranch, effectiveMinSeverity, emptyCallCounts, ensureRemoteBranch, extractJsonObject, fallbackPlan, findingFingerprint, git, inlineMarker, joinRepoPath, listChangedFilesTool, listDirectoryTool, loadConfig, loadInstructions, makeView, normalizeRepoPath, parentDir, parseConfigDoc, parseNumstat, parseToolArgs, parseUnifiedDiff, planBatches, postInlineReviewCommentTool, probeModel, readDiffTool, readFileTool, renderFileDiff, resolveBlock, resolveCommit, resolveTarget, runBatch, runReview, runSuggestionCritic, searchTool, stepSchema, summarySystemPrompt, summaryUserPrompt, validateAnswer, validatePlan };
+export { ANSWER_TOOL_SPEC, AnswerError, type AnswerPayload, BATCH_TOOL_NAMES, BATCH_TOOL_SPECS, type BatchRunOutcome, type BlockResolution, BudgetExceededError, BudgetTracker, type CallCounts, type ChangedFile, type ChatMessage, type ChatRequest, type ChatResponse, ConfigError, type Coverage, type CriticVerdict, DEFAULT_CONFIG, DEFAULT_EXCLUDE_RULES, type DiffHunk, type DiffLine, type DiffMap, type Eligibility, type ExcludeKind, type FailOnSeverity, type FileCoverage, type FileCoverageStatus, type FileStatus, type Finding, type GenerationOptions, GitError, type GitExecutionOptions, type GitHubApi, GitHubClient, GitHubError, GitHubSink, GitRefView, type GitTarget, type HeadCheck, IndexView, type InstructionBlock, LIMITS, type LLMClientOptions, LLMError, type LlmCallMetric, type LlmPhase, LocalSink, OpenAICompatibleClient, type OperationalError, type PerformanceDiagnostics, type Permission, type PipelineInputs, type PlanResult, type PostState, type ProbeResult, type PullInfo, REVIEW_MARKER_PREFIX, REVIEW_MARKER_SUFFIX, type RepoConfig, type RepoView, type ResolvedOptions, type ReviewBatch, type ReviewCommentInfo, type ReviewCommentParams, type ReviewProgressEvent, type ReviewResult, type ReviewSink, type ReviewStatus, SEVERITIES, SEVERITY_RANK, type SearchOptions, type Severity, SupersededReviewError, TOOL_NAMES, type TargetArgs, TargetError, type TemplateScalar, type Tool, type ToolCall, type ToolContext, type ToolMode, ToolRegistry, type ToolResult, type ToolSpec, ViewError, WorkTreeView, answerTool, applyGenerationPolicy, basename, batchSystemPrompt, batchUserPrompt, buildDiff, buildDiffMap, buildSummaryBody, clampResource, classifyAll, classifyFile, classifyPath, completeReviewBatchTool, completeReviewFileTool, decideToolMode, detectDefaultBranch, effectiveMinSeverity, emptyCallCounts, ensureRemoteBranch, extractJsonObject, fallbackPlan, findingFingerprint, git, inlineMarker, joinRepoPath, listChangedFilesTool, listDirectoryTool, loadConfig, loadInstructions, makeView, normalizeRepoPath, parentDir, parseConfigDoc, parseGenerationOptions, parseNumstat, parseToolArgs, parseUnifiedDiff, planBatches, postInlineReviewCommentTool, probeModel, readDiffTool, readFileTool, renderFileDiff, resolveBlock, resolveCommit, resolveTarget, runBatch, runReview, runSuggestionCritic, searchTool, stepSchema, summarySystemPrompt, summaryUserPrompt, validateAnswer, validateGenerationOptions, validatePlan };

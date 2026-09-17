@@ -12,10 +12,12 @@ import { runReview } from '../core/review/pipeline.js';
 import { LocalSink } from '../core/review/sink.js';
 import { clampResource } from '../core/security/limits.js';
 import { LIMITS } from '../core/security/limits.js';
-import type { FailOnSeverity, ResolvedOptions, Severity, ToolMode } from '../core/types.js';
+import type { FailOnSeverity, ResolvedOptions, ReviewResult, Severity, ToolMode } from '../core/types.js';
 import { formatResult, type OutputFormat } from './format.js';
 import { BudgetTracker } from '../core/review/budget.js';
 import manifest from '../../package.json' with { type: 'json' };
+import { parseGenerationOptions } from '../core/llm/generation.js';
+import { createProgressReporter } from './progress.js';
 
 const VERSION = manifest.version;
 
@@ -57,7 +59,7 @@ function buildOptions(opts: {
     toolMode,
     maxDurationMinutes: clampResource(
       Number(opts.maxDurationMinutes),
-      LIMITS.maxDurationMinutesDefault,
+      LIMITS.maxDurationMinutesLocalDefault,
       LIMITS.maxDurationMinutesHard,
     ),
     maxInlineComments: clampResource(
@@ -92,7 +94,7 @@ export function buildProgram(): Command {
     .option('--last-commit', 'review the last commit (HEAD~1..HEAD)')
     .option('--config <path>', 'repository config path', '.code-review-agent.yml')
     .option('--tool-mode <mode>', 'auto | tools | structured', 'auto')
-    .option('--max-duration-minutes <n>', 'run budget in minutes (default 20, max 120)', '20')
+    .option('--max-duration-minutes <n>', 'run budget in minutes (default 60, max 120)', '60')
     .option('--max-inline-comments <n>', 'inline comment cap (default 6, max 12)', '6')
     .option('--fail-on-severity <sev>', 'exit 3 when findings meet threshold: none|medium|high|critical', 'none')
     .option('--format <fmt>', 'terminal | markdown | json', 'terminal')
@@ -100,9 +102,12 @@ export function buildProgram(): Command {
     .option('--base-url <url>', 'OpenAI-compatible base URL (env CRA_LLM_BASE_URL)')
     .option('--model <model>', 'model id (env CRA_LLM_MODEL)')
     .option('--api-key <key>', 'API key (env CRA_LLM_API_KEY)')
+    .option('--llm-options <json>', 'operator generation settings (env CRA_LLM_OPTIONS)')
+    .option('--quiet', 'suppress progress on stderr')
     .action(async (target: string | undefined, opts) => {
       if (!['terminal', 'markdown', 'json'].includes(opts.format)) throw new Error('invalid --format');
       const clamped = buildOptions(opts);
+      const generation = parseGenerationOptions(opts.llmOptions ?? process.env.CRA_LLM_OPTIONS);
       const budget = new BudgetTracker(Date.now(), clamped.maxDurationMinutes);
       const cwd = process.cwd();
       const inGit = await git(cwd, ['rev-parse', '--is-inside-work-tree'], { budget });
@@ -138,8 +143,11 @@ export function buildProgram(): Command {
       }
 
       const sink = new LocalSink();
-      const result = await runReview({
+      const reporter = createProgressReporter(!opts.quiet && opts.format !== 'json');
+      let result: ReviewResult;
+      try { result = await runReview({
         repoDir: cwd,
+        generation, onProgress: reporter.onProgress,
         target: targetResolved,
         options: { configPath: opts.config, config: { focus: [], include: [], exclude: [], instructions: [], minSeverity: 'medium', suggestions: true }, ...clamped },
         llm,
@@ -148,19 +156,19 @@ export function buildProgram(): Command {
         budget,
         prepare: async (boundedLlm) => {
           const probe = await probeModel({ model: llm.model, chat: boundedLlm.chat,
-            listModels: () => budget.run((signal) => llm.listModels(signal)) });
+            listModels: () => budget.run((signal) => llm.listModels(signal)) }, generation);
           const decision = decideToolMode(probe, clamped.toolMode);
-          if (opts.format !== 'json') console.error(`[review] mode=${decision.mode} (${decision.reason})`);
+          if (!opts.quiet && opts.format !== 'json') console.error(`[review] mode=${decision.mode} (${decision.reason})`);
           return { mode: decision.mode };
         },
-      });
+      }); } finally { reporter.close(); }
 
       const format = opts.format as OutputFormat;
       console.log(formatResult(result, format));
       if (opts.output) {
         await fs.mkdir(path.dirname(path.resolve(opts.output)), { recursive: true });
         await fs.writeFile(opts.output, formatResult(result, 'json'), 'utf8');
-        if (format !== 'json') console.error(`[review] result written to ${opts.output}`);
+        if (!opts.quiet && format !== 'json') console.error(`[review] result written to ${opts.output}`);
       }
 
       const sevExit = failOnExitCode(clamped.failOnSeverity, result.findings);
@@ -178,8 +186,10 @@ export function buildProgram(): Command {
     .option('--base-url <url>', 'OpenAI-compatible base URL (env CRA_LLM_BASE_URL)')
     .option('--model <model>', 'model id (env CRA_LLM_MODEL)')
     .option('--api-key <key>', 'API key (env CRA_LLM_API_KEY)')
+    .option('--llm-options <json>', 'operator generation settings (env CRA_LLM_OPTIONS)')
     .action(async (opts) => {
       const budget = new BudgetTracker(Date.now(), 2);
+      const generation = parseGenerationOptions(opts.llmOptions ?? process.env.CRA_LLM_OPTIONS);
       let llm;
       try {
         const env = llmEnv(opts);
@@ -191,7 +201,7 @@ export function buildProgram(): Command {
       console.log(`doctor: probing ${llm.model} at ${llm.endpoint}`);
       const probe = await probeModel({ model: llm.model,
         chat: (request) => budget.run((signal) => llm.chat({ ...request, signal })),
-        listModels: () => budget.run((signal) => llm.listModels(signal)) });
+        listModels: () => budget.run((signal) => llm.listModels(signal)) }, generation);
       const rows: [string, boolean | null][] = [
         ['endpoint reachable', probe.reachable],
         ['model discovered', probe.discovered],

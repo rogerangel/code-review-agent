@@ -14,6 +14,10 @@ npm run eval -- --only typescript
 
 Each run builds disposable Git repos, performs bounded model preflight, and runs the real reviewer with a LOCAL sink. No GitHub comments or repository code execution occur.
 
+CRA_LLM_OPTIONS is honored by both probes and reviews. Reports record numeric generation settings and the enable_thinking flag, plus each result's performance diagnostics; arbitrary template string values are not captured. Run separate reports for the existing baseline, the bounded-thinking profile in [setup](setup-vllm.md), and an optional non-thinking configuration with model-appropriate sampling. Judge missed defects as well as false positives before adopting a quality-sensitive configuration change. The evaluation harness retains 20-minute cases so comparisons remain consistent; the CLI's longer default does not loosen these gates.
+
+For the nine-file local case, repeat the SAME unchanged target with --max-duration-minutes 20 and 60, saving separate --output JSON files. Compare coverage, generated tokens, truncation, compactions and duration. Target 9/9 within 60 minutes; a longer budget alone is not an efficiency improvement. Synthetic tests simulate 12-token/s calls but do not measure real GB10 throughput or precision.
+
 The full suite has five languages × two cases:
 
 - Existing test/fixtures/repos/ snapshots are explicitly labeled clean controls (including CRLF, rename and deletion).

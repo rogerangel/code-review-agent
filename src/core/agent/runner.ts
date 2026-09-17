@@ -19,6 +19,8 @@ import { LIMITS } from '../security/limits.js';
 import type { ToolContext } from '../types.js';
 import type { ToolRegistry } from '../tools/registry.js';
 import { TOOL_NAMES } from '../tools/schemas.js';
+import { compactTranscript } from './transcript.js';
+import { applyGenerationPolicy } from '../llm/generation.js';
 
 export interface BatchRunOutcome {
   completed: boolean;
@@ -51,6 +53,7 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
   let steps = 0;
   let malformedStreak = 0;
   let nudges = 0;
+  let truncatedStreak = 0;
 
   const messages: ChatMessage[] = [
     { role: 'system', content: params.systemPrompt },
@@ -61,8 +64,12 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
     TOOL_NAMES.completeReviewBatch,
   ];
 
-  const toolResultPayload = (name: string, r: { ok: boolean; result?: unknown; error?: string }) =>
-    JSON.stringify({ tool: name, ok: r.ok, ...(r.error ? { error: r.error } : { result: r.result }) });
+  const toolResultPayload = (name: string, r: { ok: boolean; result?: unknown; error?: string }) => {
+    let payload = JSON.stringify({ tool: name, ok: r.ok, ...(r.error ? { error: r.error } : { result: r.result }) });
+    if (payload.length > LIMITS.maxToolResultChars) payload = JSON.stringify({ tool: name, ok: false, error: 'result exceeded the bounded context limit; request a smaller range' });
+    if (ctx.performance) ctx.performance.toolResultChars += payload.length;
+    return payload;
+  };
 
   for (;;) {
     if (ctx.signal.aborted) {
@@ -87,7 +94,7 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
         error: `batch step limit (${LIMITS.maxBatchSteps}) reached`,
       };
     }
-    if (messages.reduce((total, message) => total + (message.content?.length ?? 0) + JSON.stringify(message.tool_calls ?? []).length, 0) > 200_000) {
+    if (!compactTranscript(messages, registry.specs(toolNames), ctx)) {
       return { completed: false, batchSummary: '', llmCalls, steps, error: 'bounded transcript limit reached' };
     }
     steps++;
@@ -98,16 +105,18 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
     try {
       resp =
         mode === 'tools'
-          ? await llm.chat({
+          ? await llm.chat(applyGenerationPolicy({
               messages,
               tools: registry.specs(toolNames),
               temperature: 0.2,
-            })
-          : await llm.chat({
+              phase: 'review',
+            }, ctx.generation))
+          : await llm.chat(applyGenerationPolicy({
               messages,
               jsonSchema: { name: 'step', schema: stepSchema(toolNames) },
               temperature: 0.2,
-            });
+              phase: 'review',
+            }, ctx.generation));
     } catch (err) {
       if ((err as Error).name === 'BudgetExceededError' || ((err as Error).name === 'AbortError' && ctx.budget.workExceeded())) return { completed: false, batchSummary: '', llmCalls, steps, budgetExhausted: true };
       return {
@@ -119,6 +128,15 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
         operationalFailure: true,
       };
     }
+
+    // Never execute even a syntactically valid prefix of a truncated tool response.
+    if (resp.finishReason === 'length') {
+      truncatedStreak++;
+      if (truncatedStreak > 1) return { completed: false, batchSummary: '', llmCalls, steps, error: 'output-budget-exhausted' };
+      messages.push({ role: 'user', content: 'Your previous response exceeded the output budget and NO tools from it were executed. Return only one concise tool step, without prose. Keep summaries brief.' });
+      continue;
+    }
+    truncatedStreak = 0;
 
     // ---- native tool-calling mode ----
     if (mode === 'tools') {
@@ -186,7 +204,8 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
         ctx.counters.toolCalls++;
         const result = await registry.execute(call.name, parsed, ctx);
         if (ctx.operationalErrors.length) return { completed: false, batchSummary: '', llmCalls, steps, operationalFailure: true, error: ctx.operationalErrors.at(-1)!.message };
-        malformedStreak = result.protocolError || (call.name === TOOL_NAMES.completeReviewBatch && !result.ok) ? malformedStreak + 1 : 0;
+        const completionCall = call.name === TOOL_NAMES.completeReviewBatch || call.name === TOOL_NAMES.completeReviewFile;
+        malformedStreak = result.protocolError || (completionCall && !result.ok) ? malformedStreak + 1 : 0;
         if (malformedStreak >= LIMITS.maxMalformedToolCalls) return { completed: false, batchSummary: '', llmCalls, steps, operationalFailure: true, error: 'too many invalid tool calls' };
         messages.push({
           role: 'tool',
@@ -241,7 +260,8 @@ export async function runBatch(params: RunBatchParams): Promise<BatchRunOutcome>
     messages.push({ role: 'assistant', content: resp.content });
     const result = await registry.execute(name, args, ctx);
     if (ctx.operationalErrors.length) return { completed: false, batchSummary: '', llmCalls, steps, operationalFailure: true, error: ctx.operationalErrors.at(-1)!.message };
-    malformedStreak = result.protocolError || (name === TOOL_NAMES.completeReviewBatch && !result.ok) ? malformedStreak + 1 : 0;
+    const completionCall = name === TOOL_NAMES.completeReviewBatch || name === TOOL_NAMES.completeReviewFile;
+    malformedStreak = result.protocolError || (completionCall && !result.ok) ? malformedStreak + 1 : 0;
     if (malformedStreak >= LIMITS.maxMalformedToolCalls) return { completed: false, batchSummary: '', llmCalls, steps, operationalFailure: true, error: 'too many invalid structured steps' };
     messages.push({
       role: 'user',

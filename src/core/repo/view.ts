@@ -16,6 +16,7 @@ import { git, GitError, type GitExecutionOptions } from '../diff/git.js';
 import { LIMITS } from '../security/limits.js';
 import { normalizeRepoPath } from '../security/paths.js';
 import { splitLines } from '../util.js';
+import { BudgetExceededError } from '../review/budget.js';
 
 export interface ReadResult {
   content: string;
@@ -192,11 +193,29 @@ export class GitRefView implements RepoView {
 export class WorkTreeView implements RepoView {
   kind = 'worktree' as const;
   readonly label: string;
+  private discovery?: Promise<string[] | null>;
   constructor(
     private readonly root: string,
     label?: string,
+    private readonly execution: GitExecutionOptions = {},
   ) {
     this.label = label ?? 'working tree';
+  }
+
+  private discoveryFiles(): Promise<string[] | null> {
+    this.discovery ??= (async () => {
+      const r = await git(this.root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], this.execution);
+      if (r.code !== 0) {
+        if (/not a git repository/i.test(r.stderr)) return null; // standalone RepoView support
+        throw new ViewError('cannot enumerate worktree review files', 'io');
+      }
+      return [...new Set(r.stdout.split('\0').filter((p) => p && normalizeRepoPath(p) && !p.split('/').some((s) => s.toLowerCase() === '.git')))].sort();
+    })();
+    return this.discovery;
+  }
+
+  private checkBudget(): void {
+    if (this.execution.budget?.workExceeded()) throw new BudgetExceededError();
   }
 
   private abs(p: string): string {
@@ -267,6 +286,8 @@ export class WorkTreeView implements RepoView {
 
   async listDirectory(dir: string): Promise<{ files: string[]; dirs: string[] }> {
     const n = norm(dir);
+    const discoverable = await this.discoveryFiles();
+    const visible = discoverable === null ? null : new Set(discoverable.map((p) => n ? p.startsWith(n + '/') ? p.slice(n.length + 1).split('/')[0]! : '' : p.split('/')[0]!));
     let entries;
     try {
       const abs = await this.safeAbs(n);
@@ -280,6 +301,7 @@ export class WorkTreeView implements RepoView {
     for (const e of entries) {
       if (e.name.toLowerCase() === '.git') continue;
       if (e.isSymbolicLink()) continue; // never follow symlinks
+      if (visible && !visible.has(e.name)) continue;
       if (e.isDirectory()) dirs.push(e.name);
       else files.push(e.name);
     }
@@ -297,10 +319,47 @@ export class WorkTreeView implements RepoView {
       : null;
     const results: SearchHit[] = [];
     let truncated = false;
+    let stopScanning = false;
     let scannedFiles = 0;
 
+    const scanFile = async (relPath: string) => {
+      this.checkBudget();
+      if (scannedFiles >= 2000) { truncated = true; stopScanning = true; return; }
+      scannedFiles++;
+      let content: string;
+      try { content = (await this.read(relPath)).content; } catch (err) {
+        if (err instanceof BudgetExceededError) throw err;
+        // Symlinks are intentionally outside the review surface. Other skipped
+        // files mean a negative search result is not complete evidence.
+        if (!(err instanceof ViewError && err.reason === 'symlink')) truncated = true;
+        return;
+      }
+      if (content.includes('\0')) return;
+      const lines = splitLines(content);
+      for (let i = 0; i < lines.length; i++) {
+        this.checkBudget();
+        const lineText = lines[i] ?? '';
+        const hit = literal !== null ? (opts?.caseSensitive === false ? lineText.toLowerCase().includes(literal.toLowerCase()) : lineText.includes(literal)) : re !== null && re.test(lineText);
+        if (hit) {
+          results.push({ path: relPath, line: i + 1, text: lineText });
+          if (results.length >= LIMITS.maxSearchResults) { truncated = true; stopScanning = true; return; }
+        }
+      }
+    };
+
+    const discoverable = await this.discoveryFiles();
+    if (discoverable !== null) {
+      for (const file of discoverable) {
+        if (stopScanning) break;
+        if (!dirN || file.startsWith(dirN + '/')) await scanFile(file);
+      }
+      return { results, truncated };
+    }
+
     const scanDir = async (absDir: string, relDir: string, depth: number) => {
-      if (truncated || depth > 12) return;
+      if (stopScanning) return;
+      if (depth > 12) { truncated = true; return; }
+      this.checkBudget();
       let entries;
       try {
         // Revalidate recursive directories too, not only the caller's starting path.
@@ -308,10 +367,11 @@ export class WorkTreeView implements RepoView {
         if (safe !== absDir) return;
         entries = await fs.readdir(safe, { withFileTypes: true });
       } catch {
+        truncated = true;
         return;
       }
       for (const e of entries) {
-        if (truncated) return;
+        if (stopScanning) return;
         if (e.name.toLowerCase() === '.git') continue;
         const absPath = path.join(absDir, e.name);
         const relPath = relDir === '' ? e.name : `${relDir}/${e.name}`;
@@ -321,27 +381,7 @@ export class WorkTreeView implements RepoView {
           continue;
         }
         if (!e.isFile()) continue;
-        if (scannedFiles >= 2000) {
-          truncated = true;
-          return;
-        }
-        scannedFiles++;
-        try {
-          const lines = splitLines((await this.read(relPath)).content);
-          for (let i = 0; i < lines.length; i++) {
-            const lineText = lines[i] ?? '';
-            const hit = literal !== null ? (opts?.caseSensitive === false ? lineText.toLowerCase().includes(literal.toLowerCase()) : lineText.includes(literal)) : re !== null && re.test(lineText);
-            if (hit) {
-              results.push({ path: relPath, line: i + 1, text: lineText });
-              if (results.length >= LIMITS.maxSearchResults) {
-                truncated = true;
-                return;
-              }
-            }
-          }
-        } catch {
-          // unreadable file: skip
-        }
+        await scanFile(relPath);
       }
     };
 
@@ -416,7 +456,7 @@ export class IndexView implements RepoView {
 export function makeView(kind: 'ref' | 'index' | 'worktree', repoDir: string, ref?: string, execution: GitExecutionOptions = {}): RepoView {
   if (kind === 'ref') return new GitRefView(repoDir, ref ?? 'HEAD', undefined, execution);
   if (kind === 'index') return new IndexView(repoDir, execution);
-  return new WorkTreeView(repoDir);
+  return new WorkTreeView(repoDir, undefined, execution);
 }
 
 function parseGrep(output: string, prefix = ''): { results: SearchHit[]; truncated: boolean } {

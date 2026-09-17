@@ -28,7 +28,7 @@ Trusted reviewer executables live in reviewer/; PR code lives in review-target/ 
 
 Accepted findings remain in the normalized result even when delivery fails or the inline quota is full. Their delivery is posted, reused, local, summary_only, or failed. A failed run fails the job; ordinary findings and partial results are advisory. Optional fail_on_severity can also fail on accepted findings.
 
-Coverage credits require complete diff reads and explicit reviewed/skipped file lists. Planner-skipped files stay eligible. A budget-limited run cannot become clean.
+Coverage credits require complete diff reads and explicit review completion. The agent checkpoints each file with complete_review_file, preserving coverage when a later file times out; complete_review_batch remains compatible. Planner-skipped files stay eligible. A budget-limited run cannot become clean.
 
 ## Local use before publishing
 
@@ -54,7 +54,7 @@ Alternatively, create a local npm tarball and install that file, as described in
 
 - Tools cannot execute shell commands, builds/tests, edit files, approve PRs, or request changes.
 - Inline anchors must resolve uniquely to source, overlap an added line, and fit wholly in one visible RIGHT-side hunk. Multiline suggestions use that full range.
-- Medium severity floor; default 6 new inline comments (hard 12), ≤6 batches, 20-minute run budget (hard 120). Reused comments consume no new-comment quota.
+- Medium severity floor; default 6 new inline comments (hard 12), ≤6 batches. CLI defaults to 60 minutes; GitHub defaults to 20 (hard 120 for both). Reused comments consume no new-comment quota. Caps are never comment quotas.
 - Every physical GitHub mutation/retry rechecks the PR head/state; comments pin commit_id. Checks are not an atomic GitHub transaction, so a push can still race a request.
 - Hidden fingerprints reuse exact matching bot-owned comments on the same head. Paraphrased findings are not semantic deduplication; new heads start new sets.
 - Tokens stay in host clients, not model prompts. GitHub mutation retries reconcile ambiguous responses before retrying.
@@ -62,6 +62,12 @@ Alternatively, create a local npm tarball and install that file, as described in
 - No raw prompt/reasoning/snapshot uploads by default. Findings and summary prose are deliberately published to the PR.
 
 Head guidance is advisory, not a security guarantee against prompt injection. It can change review focus and exclusions, so review changes to those files carefully. Programmatic checks protect tool scope, not model judgment.
+
+## Slow local inference
+
+Every review phase has an output-token cap. Repository tools return paginated/bounded context, broad worktree discovery respects Git ignores, and old tool exchanges are compacted without an extra model call. Reasoning from either modern reasoning or legacy reasoning_content fields stays out of history and diagnostics.
+
+Use --llm-options or CRA_LLM_OPTIONS for operator-owned thinking/sampling controls; no model name is hardcoded. See [vLLM generation settings](docs/setup-vllm.md). Progress and 30-second inference heartbeats go to stderr; --quiet suppresses them, and --format json keeps stdout machine-readable. Optional performance records in result v1 contain timing, reported token usage, caps and compactions, never prompts or reasoning text.
 
 ## Guides
 

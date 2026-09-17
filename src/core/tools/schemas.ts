@@ -12,6 +12,7 @@ export const TOOL_NAMES = {
   listDirectory: 'list_directory',
   search: 'search',
   postInlineReviewComment: 'post_inline_review_comment',
+  completeReviewFile: 'complete_review_file',
   completeReviewBatch: 'complete_review_batch',
   answer: 'answer',
 } as const;
@@ -23,7 +24,7 @@ export const BATCH_TOOL_SPECS: ToolSpec[] = [
     name: TOOL_NAMES.listChangedFiles,
     description:
       'List every changed file in the review target with status, added/deleted line counts, and eligibility. Call this first to understand the change surface.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    parameters: { type: 'object', properties: { offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset (default 0).' } }, additionalProperties: false },
   },
   {
     name: TOOL_NAMES.readDiff,
@@ -33,6 +34,7 @@ export const BATCH_TOOL_SPECS: ToolSpec[] = [
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Repository-relative file path from list_changed_files.' },
+        offset: { type: 'integer', minimum: 0, description: 'Normalized rendered-line offset. Follow next_offset until has_more=false.' },
       },
       required: ['path'],
       additionalProperties: false,
@@ -41,7 +43,7 @@ export const BATCH_TOOL_SPECS: ToolSpec[] = [
   {
     name: TOOL_NAMES.readFile,
     description:
-      'Read file content as of the reviewed head commit (read-only). Optionally read a 1-based inclusive line range.',
+      'Read file content as of the reviewed head commit (read-only), up to 200 lines per call. Follow next_start_line for more context.',
     parameters: {
       type: 'object',
       properties: {
@@ -64,6 +66,7 @@ export const BATCH_TOOL_SPECS: ToolSpec[] = [
           type: 'string',
           description: 'Repository-relative directory path. Use the empty string for the repository root.',
         },
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset (default 0).' },
       },
       required: ['path'],
       additionalProperties: false,
@@ -114,6 +117,14 @@ export const BATCH_TOOL_SPECS: ToolSpec[] = [
       required: ['severity', 'path', 'block', 'explanation'],
       additionalProperties: false,
     },
+  },
+  {
+    name: TOOL_NAMES.completeReviewFile,
+    description: 'Checkpoint one assigned file after reading its entire diff, verifying issues, and posting its findings. This survives later batch interruption. Never call just because you read the diff.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string', description: 'Assigned repository-relative file path.' },
+      summary: { type: 'string', description: 'Brief outcome of the completed review; no praise or low-impact nits.' },
+    }, required: ['path', 'summary'], additionalProperties: false },
   },
   {
     name: TOOL_NAMES.completeReviewBatch,

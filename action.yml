@@ -29,6 +29,10 @@ inputs:
     description: 'Optional API key for the endpoint.'
     required: false
     default: ''
+  llm_options:
+    description: 'Operator generation settings as JSON (completion caps, optional provider thinking budget/template kwargs, sampling). Never read from PR configuration.'
+    required: false
+    default: '{}'
   config_path:
     description: 'Repository configuration file (review focus, include/exclude globs, instructions, severity threshold, suggestions).'
     required: false

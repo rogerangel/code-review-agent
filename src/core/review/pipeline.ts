@@ -14,12 +14,14 @@ import { batchSystemPrompt, batchUserPrompt, summarySystemPrompt, summaryUserPro
 import { ToolRegistry } from '../tools/registry.js';
 import { listChangedFilesTool, readDiffTool, readFileTool, listDirectoryTool, searchTool } from '../tools/read-only.js';
 import { postInlineReviewCommentTool } from '../tools/post-comment.js';
-import { completeReviewBatchTool, answerTool, validateAnswer, type AnswerPayload } from '../tools/answer.js';
+import { completeReviewBatchTool, completeReviewFileTool, answerTool, validateAnswer, type AnswerPayload } from '../tools/answer.js';
 import { ANSWER_TOOL_SPEC } from '../tools/schemas.js';
 import { extractJsonObject, parseToolArgs, type LlmClient, type ChatMessage } from '../llm/client.js';
 import { REVIEW_MARKER_PREFIX, REVIEW_MARKER_SUFFIX, type CallCounts, type Coverage, type FileCoverage,
-  type Finding, type OperationalError, type ReviewResult, type ReviewStatus, type ToolContext, type DiffMap } from '../types.js';
+  type Finding, type OperationalError, type ReviewResult, type ReviewStatus, type ToolContext, type DiffMap,
+  type LlmCallMetric, type PerformanceDiagnostics, type ReviewProgressEvent } from '../types.js';
 import { truncate } from '../util.js';
+import { applyGenerationPolicy, validateGenerationOptions, type GenerationOptions } from '../llm/generation.js';
 
 export interface PipelineInputs {
   repoDir: string;
@@ -34,6 +36,8 @@ export interface PipelineInputs {
   budget?: BudgetTracker;
   gitOptions?: GitExecutionOptions;
   prContext?: { title: string; description: string };
+  generation?: GenerationOptions;
+  onProgress?: (event: ReviewProgressEvent) => void;
   /** Runs inside the same deadline/result handling, using the counted, bounded client. */
   prepare?: (llm: LlmClient) => Promise<{ mode?: 'tools' | 'structured'; target?: GitTarget }>;
 }
@@ -56,12 +60,41 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
   let target = inputs.target, mode = inputs.mode;
   let stage = 'preflight', budgetExhausted = false, headChanged = false;
   let ctx: ToolContext | undefined;
+  let generation: GenerationOptions = {};
+  const performance: PerformanceDiagnostics = { llmCalls: [], transcriptCompactions: 0, toolResultChars: 0 };
+  const progress = (event: ReviewProgressEvent) => {
+    // Observers cannot change review acceptance or deadline behavior.
+    try { inputs.onProgress?.(event); } catch { /* observer failure is non-operational */ }
+  };
   const llm: LlmClient = {
     model: inputs.llm.model,
-    chat: (request) => {
+    chat: async (request) => {
       counters.llmCalls++;
+      const bounded = applyGenerationPolicy(request, generation);
+      const started = Date.now();
+      const metric: LlmCallMetric = { index: counters.llmCalls, phase: bounded.phase!,
+        ...(bounded.phase === 'review' || bounded.phase === 'suggestion-critic' ? { batchIndex: ctx?.postState.batchIndex } : {}),
+        durationMs: 0, maxOutputTokens: bounded.maxTokens!, thinkingTokenBudget: bounded.thinkingTokenBudget, outcome: 'error' };
+      progress({ type: 'call-start', index: metric.index, phase: metric.phase, batchIndex: metric.batchIndex, elapsedMs: budget.elapsed() });
       const parent = request.signal ? AbortSignal.any([request.signal, abort.signal]) : abort.signal;
-      return budget.run((signal) => inputs.llm.chat({ ...request, signal }), false, parent);
+      try {
+        const response = await budget.run((signal) => inputs.llm.chat({ ...bounded, signal }), false, parent);
+        for (const key of ['promptTokens', 'completionTokens', 'reasoningTokens', 'cachedPromptTokens'] as const) {
+          const value = response.usage?.[key];
+          if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) metric[key] = value;
+        }
+        metric.reasoningChars = typeof response.reasoning === 'string' ? response.reasoning.length : undefined;
+        metric.finishReason = ['stop', 'length', 'tool_calls', 'function_call', 'content_filter'].includes(response.finishReason ?? '') ? response.finishReason : response.finishReason ? 'unknown' : undefined;
+        metric.outcome = response.finishReason === 'length' ? 'truncated' : 'completed';
+        return response;
+      } catch (err) {
+        if (budget.workExceeded() || parent.aborted || ['AbortError', 'TimeoutError', 'BudgetExceededError'].includes((err as Error).name)) metric.outcome = 'aborted';
+        throw err;
+      } finally {
+        metric.durationMs = Math.max(0, Date.now() - started);
+        performance.llmCalls.push(metric);
+        progress({ type: 'call-end', metric: { ...metric }, elapsedMs: budget.elapsed() });
+      }
     },
   };
   const gitOptions = { ...inputs.gitOptions, budget };
@@ -71,6 +104,7 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
   };
 
   try {
+    generation = validateGenerationOptions(inputs.generation);
     const prepared = await inputs.prepare?.(llm);
     mode = prepared?.mode ?? mode;
     target = prepared?.target ?? target;
@@ -105,10 +139,11 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
       for (const skip of plan.skipped) markSkipped(skip.file, 'planner: ' + skip.reason);
       const registry = new ToolRegistry().register(listChangedFilesTool).register(readDiffTool)
         .register(readFileTool).register(listDirectoryTool).register(searchTool)
-        .register(postInlineReviewCommentTool).register(completeReviewBatchTool);
+        .register(postInlineReviewCommentTool).register(completeReviewFileTool).register(completeReviewBatchTool);
       ctx = {
         reviewId, diff, view, options: inputs.options, config, instructions, budget, counters,
         sink: inputs.sink, llm, findings, operationalErrors: errors, diffReads: new Set(), batchFiles: [],
+        diffReadPages: new Map(), fileCompletions: new Map(), performance, onProgress: progress, generation,
         postState: { posted: 0, postedFingerprints: new Set(), batchIndex: 0 },
         signal: abort.signal, abortReview: () => { headChanged = true; abort.abort(); },
       };
@@ -120,6 +155,7 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
         ctx.batchFiles = batch.files;
         ctx.batchCompletion = undefined;
         ctx.diffReads = new Set();
+        ctx.diffReadPages = new Map();
         const outcome = await runBatch({
           llm, registry, ctx, mode,
           systemPrompt: batchSystemPrompt({ config, options: inputs.options, instructions }),
@@ -128,7 +164,8 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
             batchIndex: batch.index, totalBatches: plan.batches.length, notes: batch.notes,
           }) + '\n\nUntrusted PR/context data:\n' + JSON.stringify({
             pull_request: inputs.prContext ? { title: truncate(inputs.prContext.title, 1000), description: truncate(inputs.prContext.description, 8000) } : undefined,
-            existing_same_head_comments: existing.slice(0, 12),
+            existing_same_head_comments: existing.slice(0, 12).map((comment) => ({ file: comment.file,
+              body: truncate(comment.body, 500), url: truncate(comment.url ?? '', 300) })),
           }),
         });
         if (outcome.completed && outcome.completion) {
@@ -154,6 +191,14 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
     if (err instanceof SupersededReviewError || headChanged) headChanged = true;
     else if (err instanceof BudgetExceededError || ((err as Error).name === 'AbortError' && budget.workExceeded())) budgetExhausted = true;
     else errors.push({ stage, code: 'operational-failure', message: (err as Error).message });
+  }
+
+  // Collect explicit checkpoints even when a tool/deadline threw out of the batch loop.
+  for (const [file, completion] of ctx?.fileCompletions ?? []) {
+    const row = coverage.find((item) => item.file === file);
+    if (row && eligible.includes(file)) {
+      row.status = 'reviewed'; row.reason = undefined; row.batch = completion.batchIndex; reviewed.add(file);
+    }
   }
 
   for (const row of coverage) {
@@ -195,6 +240,7 @@ export async function runReview(inputs: PipelineInputs): Promise<ReviewResult> {
     model: inputs.llm.model, findings, coverage: getCoverage(), summary, operationalErrors: errors,
     startedAt: new Date(budget.startedAt).toISOString(), finishedAt: new Date().toISOString(),
     durationMs: budget.elapsed(), callCounts: counters,
+    performance,
   };
   const updateStatus = () => {
     result.status = getStatus();
@@ -247,9 +293,21 @@ async function runSummaryAgent(
   for (let attempt = 0; attempt < 3; attempt++) {
     const response = await llm.chat({
       messages, temperature: 0,
+      phase: 'summary', maxTokens: 1536,
       ...(mode === 'tools' ? { tools: [ANSWER_TOOL_SPEC], toolChoice: { function: { name: 'answer' } } } :
         { jsonSchema: { name: 'answer', schema: ANSWER_TOOL_SPEC.parameters } }),
     });
+    if (response.finishReason === 'length') {
+      const payload: AnswerPayload = { status, summary: `Reviewed ${facts.reviewedFiles.size}/${facts.eligibleFiles.length} eligible files; ${facts.findingsCount} accepted findings. Final model summary exceeded its output budget.`,
+        reviewedFiles: [...facts.reviewedFiles], skippedFiles: coverage.filter((row) => facts.eligibleFiles.includes(row.file) && row.status === 'skipped')
+          .map((row) => ({ file: row.file, reason: row.reason ?? 'not-reviewed' })) };
+      const validation = validateAnswer(payload, facts);
+      if (validation) throw validation;
+      const accepted = await answerTool.execute({ status: payload.status, summary: payload.summary,
+        reviewed_files: payload.reviewedFiles, skipped_files: payload.skippedFiles }, ctx);
+      if (!accepted.ok) throw new Error('deterministic answer rejected');
+      return payload;
+    }
     const call = response.toolCalls[0];
     const raw = mode === 'tools' ?
       response.toolCalls.length === 1 && call?.name === 'answer' ? parseToolArgs(call.arguments) : null :

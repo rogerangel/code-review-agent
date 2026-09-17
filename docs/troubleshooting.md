@@ -30,11 +30,19 @@
 - 401/403/server/transport errors: operational failure, not a reason to silently switch modes.
 - Explicit structured mode still probes: intentional; mode selection does not waive preflight.
 - Context-limit error: reduce diff/context workload or configure a suitable server context length. No universal GB10 context size is assumed.
+- reasoning separation n/a: ensure the updated client recognizes reasoning as well as legacy reasoning_content. No observed field is not evidence that thinking is off.
+- llm_options rejected: check provider support and JSON validation. Overrides are explicit and never silently removed to make probes pass.
+- Long inference: inspect result.performance.llmCalls for phase, duration, reported completion/reasoning usage, reasoningChars, and configured caps. At 12 tokens/s, 3000 generated tokens take about four minutes; prefix caching cannot remove that decoding work.
+- Unsupported upgrade warning followed by successful HTTP requests: inspect client/proxy upgrade headers separately; this alone does not establish an inference failure.
 
 ## Result interpretation
 
 - Head moved: status partial with head-changed-during-review; old comments remain and the old run does not intentionally overwrite a newer summary. SHA checks and writes are not transactional.
 - Time budget expired: partial, never clean; a reserved host-finalization window tries to publish deterministic facts.
+- Local CLI now defaults to 60 minutes (inference can stop near 59); GitHub/API examples retain 20 (near 19). Use an explicit --max-duration-minutes to compare fairly. Longer runs are fresh reviews, not resumptions.
+- output-budget-exhausted: no tools from truncated responses were executed. After one concise retry, the remaining batch stays partial; earlier file checkpoints and accepted findings remain.
+- bounded transcript limit reached: history compaction could not fit the immutable task and recent evidence under the hard cap. Reduce guidance/workload; the reviewer never drops system rules to continue.
+- File inspected but not counted: all diff pages plus explicit completion are required. A truncated line or skipped page cannot earn coverage. Reading alone is not review completion.
 - Planner skips / unread or truncated diffs: partial coverage. They cannot disappear from the eligible denominator.
 - Repeated prose, malformed tools, or invalid final answer: failed, not clean.
 - Suggestion uncertain/rejected: ordinary explanatory finding remains; no apply-ready patch is posted.

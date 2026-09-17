@@ -155,7 +155,37 @@ export interface ReviewResult {
   callCounts: CallCounts;
   /** URL of the sticky summary comment (GitHub mode). */
   summaryCommentUrl?: string;
+  /** Numeric diagnostics only; never prompts, reasoning text or configuration values. */
+  performance?: PerformanceDiagnostics;
 }
+
+export interface LlmCallMetric {
+  index: number;
+  phase: import('./llm/generation.js').LlmPhase;
+  batchIndex?: number;
+  durationMs: number;
+  maxOutputTokens: number;
+  thinkingTokenBudget?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  reasoningTokens?: number;
+  cachedPromptTokens?: number;
+  reasoningChars?: number;
+  finishReason?: string;
+  outcome: 'completed' | 'truncated' | 'error' | 'aborted';
+}
+
+export interface PerformanceDiagnostics {
+  llmCalls: LlmCallMetric[];
+  transcriptCompactions: number;
+  toolResultChars: number;
+}
+
+export type ReviewProgressEvent =
+  | { type: 'call-start'; index: number; phase: LlmCallMetric['phase']; batchIndex?: number; elapsedMs: number }
+  | { type: 'call-end'; metric: LlmCallMetric; elapsedMs: number }
+  | { type: 'file-completed'; file: string; batchIndex: number; elapsedMs: number }
+  | { type: 'transcript-compacted'; count: number; elapsedMs: number };
 
 export interface RepoConfig {
   /** Review focus areas (freeform strings fed into the prompt). */
@@ -218,6 +248,12 @@ export interface ToolContext {
   findings: Finding[];
   operationalErrors: OperationalError[];
   diffReads: Set<string>;
+  diffReadPages?: Map<string, Set<number>>;
+  /** Explicit per-file checkpoints survive an interrupted batch. */
+  fileCompletions?: Map<string, { summary: string; batchIndex: number }>;
+  performance?: PerformanceDiagnostics;
+  onProgress?: (event: ReviewProgressEvent) => void;
+  generation?: import('./llm/generation.js').GenerationOptions;
   batchFiles: string[];
   batchCompletion?: { reviewedFiles: string[]; skippedFiles: { file: string; reason: string }[] };
 }

@@ -5,7 +5,7 @@
  * hosts reached over Tailscale). Handles:
  *  - native tool calling (tool_calls) with defensive argument parsing
  *  - JSON-schema structured output (vLLM guided decoding) as a fallback
- *  - reasoning separation: `reasoning_content` is never replayed into the
+ *  - reasoning separation: `reasoning` / `reasoning_content` are never replayed into the
  *    transcript and never mixed into tool arguments
  *
  * The API key is held only in this module and in outgoing headers; it is
@@ -40,7 +40,7 @@ export interface ChatResponse {
   /** Model reasoning, kept out of the transcript by the caller. */
   reasoning?: string;
   finishReason?: string;
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: { promptTokens?: number; completionTokens?: number; reasoningTokens?: number; cachedPromptTokens?: number };
 }
 
 export interface ChatRequest {
@@ -51,6 +51,13 @@ export interface ChatRequest {
   jsonSchema?: { name: string; schema: Record<string, unknown> };
   temperature?: number;
   maxTokens?: number;
+  /** Host-only metadata, never serialized to the inference API. */
+  phase?: import('./generation.js').LlmPhase;
+  thinkingTokenBudget?: number;
+  chatTemplateKwargs?: Record<string, import('./generation.js').TemplateScalar>;
+  topP?: number;
+  topK?: number;
+  presencePenalty?: number;
   signal?: AbortSignal;
 }
 
@@ -71,6 +78,7 @@ export interface WireMessage {
   tool_calls?: WireToolCall[];
   /** Some providers (e.g. Qwen via vLLM) return chain-of-thought here. */
   reasoning_content?: string;
+  reasoning?: string;
 }
 
 export interface WireChoice {
@@ -81,6 +89,8 @@ export interface WireChoice {
 export interface WireUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  completion_tokens_details?: { reasoning_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number };
 }
 
 export interface WireChatCompletion {
@@ -163,6 +173,11 @@ export class OpenAICompatibleClient implements LlmClient {
     };
     if (req.temperature !== undefined) body.temperature = req.temperature;
     if (req.maxTokens !== undefined) body.max_tokens = req.maxTokens;
+    if (req.thinkingTokenBudget !== undefined) body.thinking_token_budget = req.thinkingTokenBudget;
+    if (req.chatTemplateKwargs !== undefined) body.chat_template_kwargs = req.chatTemplateKwargs;
+    if (req.topP !== undefined) body.top_p = req.topP;
+    if (req.topK !== undefined) body.top_k = req.topK;
+    if (req.presencePenalty !== undefined) body.presence_penalty = req.presencePenalty;
     if (req.tools && req.tools.length > 0) {
       body.tools = req.tools.map((t) => ({
         type: 'function',
@@ -196,12 +211,14 @@ export class OpenAICompatibleClient implements LlmClient {
     return {
       content: typeof msg.content === 'string' ? msg.content : null,
       toolCalls,
-      reasoning: typeof msg.reasoning_content === 'string' ? msg.reasoning_content : undefined,
+      reasoning: typeof msg.reasoning === 'string' ? msg.reasoning : typeof msg.reasoning_content === 'string' ? msg.reasoning_content : undefined,
       finishReason: choice.finish_reason,
       usage: res.usage
         ? {
-            promptTokens: res.usage.prompt_tokens ?? 0,
-            completionTokens: res.usage.completion_tokens ?? 0,
+            promptTokens: tokenCount(res.usage.prompt_tokens),
+            completionTokens: tokenCount(res.usage.completion_tokens),
+            reasoningTokens: tokenCount(res.usage.completion_tokens_details?.reasoning_tokens),
+            cachedPromptTokens: tokenCount(res.usage.prompt_tokens_details?.cached_tokens),
           }
         : undefined,
     };
@@ -245,6 +262,10 @@ export class OpenAICompatibleClient implements LlmClient {
       throw new LLMError('LLM returned non-JSON response');
     }
   }
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 async function safeReadBody(res: Response): Promise<string> {

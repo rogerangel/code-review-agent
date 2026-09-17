@@ -39,8 +39,9 @@ try {
   const version = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version;
   assert.equal(run('node', [path.join(installDir, 'node_modules/code-review-agent/dist/cli.js'), '--version'], installDir).trim(), version);
   assert.match(run('node', [path.join(installDir, 'node_modules/code-review-agent/dist/cli.js'), '--help'], installDir), /doctor/);
+  assert.match(run('node', [path.join(installDir, 'node_modules/code-review-agent/dist/cli.js'), 'review', '--help'], installDir), /--llm-options/);
   run('node', ['--input-type=module', '-e',
-    'import {runReview,BudgetTracker,GitHubSink} from "code-review-agent"; if(![runReview,BudgetTracker,GitHubSink].every(x=>typeof x==="function"))process.exit(1)'], installDir);
+    'import {runReview,BudgetTracker,GitHubSink,parseGenerationOptions,completeReviewFileTool} from "code-review-agent"; if(![runReview,BudgetTracker,GitHubSink,parseGenerationOptions].every(x=>typeof x==="function")||completeReviewFileTool.spec.name!=="complete_review_file"||parseGenerationOptions().maxOutputTokens!==undefined)process.exit(1)'], installDir);
   console.log('PASS: packed, installed CLI and API exports.');
 } finally {
   // Explicit directory from mkdtemp; no workspace or user data is removed.

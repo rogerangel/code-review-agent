@@ -14,6 +14,8 @@ export const LIMITS = {
   maxDurationMinutesHard: 120,
   /** Default run duration budget in minutes. */
   maxDurationMinutesDefault: 20,
+  /** Local CLI defaults can accommodate slower private inference. */
+  maxDurationMinutesLocalDefault: 60,
   /** Maximum bytes read from a single file. */
   maxFileBytes: 2 * 1024 * 1024,
   /** Maximum lines read from a single file. */
@@ -22,6 +24,12 @@ export const LIMITS = {
   maxDiffCharsPerFile: 200_000,
   /** Maximum search results returned per call. */
   maxSearchResults: 200,
+  maxToolResultChars: 16_000,
+  maxSearchSnippetChars: 512,
+  maxReadFileLinesPerCall: 200,
+  transcriptCompactChars: 120_000,
+  maxTranscriptChars: 200_000,
+  maxOutputTokensHard: 16_384,
   /** Maximum instruction bytes per file. */
   maxInstructionBytesPerFile: 20_000,
   /** Maximum total instruction bytes. */

@@ -18,6 +18,8 @@ suggestions: true
 
 Only focus, include, exclude, instructions, min_severity, and suggestions are accepted. Unknown keys or invalid types fail the run. Repository config cannot supply credentials/endpoints, add tools, alter permissions, or raise resource ceilings.
 
+Generation settings are operator-owned, not repository policy: use CLI --llm-options / CRA_LLM_OPTIONS, Action/workflow llm_options, or SDK GenerationOptions. See [vLLM setup](setup-vllm.md) for the allowlist and bounded-thinking profile. Local CLI reviews default to 60 minutes; GitHub reviews keep their 20-minute default.
+
 ## File eligibility
 
 Binary files are always excluded. Explicit exclude globs always win. A NONEMPTY include list is a whitelist: it excludes every nonmatching file and opts matching files back in past default lock/generated/vendor exclusions. This is not an additive include list.
@@ -25,6 +27,8 @@ Binary files are always excluded. Explicit exclude globs always win. A NONEMPTY 
 Defaults exclude common lockfiles, dependency/vendor directories, and generated build output. See src/core/filtering/eligibility.ts for the exact rules.
 
 Coverage lists every changed file. Deterministically excluded files are outside the eligible count. Planner skips, unread/truncated diffs, or agent skips remain eligible and yield partial coverage. If all files are excluded, the run is skipped.
+
+The agent can checkpoint a file with complete_review_file after reading every untruncated diff page. That credit survives later timeouts or failures; reading a diff alone never counts as reviewing it. The existing complete_review_batch tool remains supported.
 
 ## Guidance
 

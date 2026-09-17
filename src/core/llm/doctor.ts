@@ -8,7 +8,9 @@ import {
   LLMError,
   parseToolArgs,
   extractJsonObject,
+  type ChatRequest,
 } from './client.js';
+import { applyGenerationPolicy, validateGenerationOptions, type GenerationOptions } from './generation.js';
 
 export interface ProbeResult {
   /** Endpoint reachable and models list served. */
@@ -20,7 +22,7 @@ export interface ProbeResult {
   /** JSON-schema structured output produced a valid object. */
   structuredOk: boolean;
   /**
-   * Reasoning separation: when the model emits reasoning_content, the
+   * Reasoning separation: when the model emits a normalized reasoning field, the
    * visible content is not contaminated with tool-call JSON.
    */
   reasoningSeparated: boolean | null;
@@ -39,7 +41,8 @@ const PROBE_TOOL = {
   },
 } as const;
 
-export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 'chat' | 'listModels'>): Promise<ProbeResult> {
+export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 'chat' | 'listModels'>, generation: GenerationOptions = {}): Promise<ProbeResult> {
+  validateGenerationOptions(generation);
   const details: string[] = [];
   const result: ProbeResult = {
     reachable: false,
@@ -54,6 +57,15 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
     if (!(err instanceof LLMError) || ![400, 404, 422].includes(err.status ?? 0)) {
       result.fatalError = (err as Error).message;
     }
+  };
+  const chat = async (request: ChatRequest) => {
+    const response = await client.chat(applyGenerationPolicy({ ...request, phase: 'probe' }, generation));
+    const leakedTags = /<think>|<\/think>/.test(response.content ?? '');
+    if (response.reasoning !== undefined || leakedTags) {
+      const leaked = leakedTags || /"tool_calls"/.test(response.content ?? '');
+      result.reasoningSeparated = result.reasoningSeparated !== false && !leaked;
+    }
+    return response;
   };
 
   // 1. Reachability + model discovery.
@@ -72,9 +84,23 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
     return result;
   }
 
+  // Check operator overrides independently of tool/schema capability support.
+  if (Object.keys(generation).length) {
+    try {
+      const response = await chat({ messages: [{ role: 'user', content: 'Reply with OK only.' }], temperature: 0 });
+      if (response.finishReason === 'length') throw new Error('configured generation probe exhausted its output budget');
+      details.push('configured generation settings accepted by the endpoint');
+    } catch (err) {
+      if ((err as Error).name === 'BudgetExceededError') throw err;
+      result.fatalError = 'configured generation request rejected: ' + (err as Error).message;
+      details.push(result.fatalError);
+      return result;
+    }
+  }
+
   // 2. Structured output.
   try {
-    const resp = await client.chat({
+    const resp = await chat({
       messages: [
         { role: 'user', content: 'Return the JSON object for a person named "Ada" with age 36.' },
       ],
@@ -91,7 +117,7 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
       maxTokens: 2048,
     });
     const obj = extractJsonObject(resp.content ?? '');
-    if (obj?.name === 'Ada' && obj.age === 36 && Object.keys(obj).length === 2) {
+    if (resp.finishReason !== 'length' && obj?.name === 'Ada' && obj.age === 36 && Object.keys(obj).length === 2) {
       result.structuredOk = true;
       details.push('structured output produced a valid JSON object');
     } else {
@@ -105,7 +131,7 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
 
   // 3. Tool calling.
   try {
-    const resp = await client.chat({
+    const resp = await chat({
       messages: [
         {
           role: 'user',
@@ -124,10 +150,10 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
       maxTokens: 2048,
     });
     const call = resp.toolCalls[0];
-    if (call && call.name === PROBE_TOOL.name) {
+    if (resp.finishReason !== 'length' && call && call.name === PROBE_TOOL.name) {
       const args = parseToolArgs(call.arguments);
       if (args?.city === 'Paris' && resp.toolCalls.length === 1) {
-        const followup = await client.chat({
+        const followup = await chat({
           messages: [
             { role: 'user', content: 'Get the weather in Paris using get_weather; then report the temperature.' },
             { role: 'assistant', content: resp.content, tool_calls: resp.toolCalls },
@@ -138,7 +164,7 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
           temperature: 0,
           maxTokens: 2048,
         });
-        result.supportsTools = followup.toolCalls.length === 0 && /\b17\b/.test(followup.content ?? '');
+        result.supportsTools = followup.finishReason !== 'length' && followup.toolCalls.length === 0 && /\b17\b/.test(followup.content ?? '');
         details.push(result.supportsTools ? 'native tool/result/follow-up round trip verified' : 'tool-result follow-up failed');
       } else {
         details.push('tool call arguments did not match the requested city');
@@ -149,12 +175,10 @@ export async function probeModel(client: Pick<OpenAICompatibleClient, 'model' | 
       );
     }
     // 4. Reasoning separation: judged from whichever response carried reasoning.
-    if (resp.reasoning !== undefined) {
-      const contentLooksJson = /"tool_calls"|^\s*\{/.test(resp.content ?? '');
-      result.reasoningSeparated = !contentLooksJson;
+    if (result.reasoningSeparated !== null) {
       details.push(
         result.reasoningSeparated
-          ? 'reasoning_content kept separate from content'
+          ? 'normalized reasoning kept separate from content'
           : 'reasoning leaked into content/tool arguments',
       );
     }

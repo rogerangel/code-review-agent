@@ -15,6 +15,7 @@ import { ensureRemoteBranch, git } from '../core/diff/git.js';
 import { clampResource, LIMITS } from '../core/security/limits.js';
 import { DEFAULT_CONFIG } from '../core/config.js';
 import { SEVERITY_RANK, type FailOnSeverity, type ReviewResult, type ToolMode } from '../core/types.js';
+import { parseGenerationOptions } from '../core/llm/generation.js';
 
 let budget = new BudgetTracker(Date.now(), 20);
 function emptyResult(status: ReviewResult['status'], reason: string, operational = false): ReviewResult {
@@ -49,6 +50,7 @@ async function main(): Promise<ReviewResult> {
   const toolMode = (readInput('tool_mode') || 'auto') as ToolMode;
   const failOnSeverity = (readInput('fail_on_severity') || 'none') as FailOnSeverity;
   if (!baseUrl || !model) throw new Error('llm_base_url and llm_model are required');
+  const generation = parseGenerationOptions(readInput('llm_options'));
   if (!['auto', 'tools', 'structured'].includes(toolMode)) throw new Error('invalid tool_mode');
   if (!['none', 'medium', 'high', 'critical'].includes(failOnSeverity)) throw new Error('invalid fail_on_severity');
   const expectedHead = readInput('expected_head_sha') || pr.head.sha;
@@ -62,7 +64,7 @@ async function main(): Promise<ReviewResult> {
   } };
   const llm = new OpenAICompatibleClient({ baseUrl, model, apiKey: readInput('llm_api_key') || undefined, budget });
   return runReview({
-    repoDir, budget, gitOptions,
+    repoDir, budget, gitOptions, generation,
     target: { kind: 'three-dot', label: 'PR #' + pr.number, baseRev: pr.base.sha, headRev: expectedHead, viewKind: 'ref' },
     options: { configPath: readInput('config_path') || '.code-review-agent.yml', toolMode, maxDurationMinutes,
       maxInlineComments: clampResource(Number(readInput('max_inline_comments') || 6), 6, LIMITS.maxInlineCommentsHard),
@@ -79,7 +81,7 @@ async function main(): Promise<ReviewResult> {
       if (remote.code !== 0 || remote.stdout.trim().replace(/\.git\/?$/, '').replace(/\/$/, '') !== serverUrl + '/' + repoFull) throw new Error('PR snapshot origin must be the base repository HTTPS URL');
       await ensureRemoteBranch(repoDir, pr.base.ref, gitOptions);
       const probe = await probeModel({ model, chat: boundedLlm.chat,
-        listModels: () => budget.run((signal) => llm.listModels(signal)) });
+        listModels: () => budget.run((signal) => llm.listModels(signal)) }, generation);
       return { mode: decideToolMode(probe, toolMode).mode };
     },
   });
@@ -103,6 +105,8 @@ async function outputs(result: ReviewResult): Promise<void> {
     '**Reused inline comments:** ' + result.callCounts.inlineCommentsReused,
     '**Duration:** ' + Math.round(result.durationMs / 1000) + 's',
     '**Calls:** ' + result.callCounts.llmCalls + ' LLM, ' + result.callCounts.toolCalls + ' tools',
+    ...(result.performance ? ['**Transcript compactions:** ' + result.performance.transcriptCompactions,
+      '**Truncated model responses:** ' + result.performance.llmCalls.filter((call) => call.outcome === 'truncated').length] : []),
     ...(result.summaryCommentUrl ? ['Summary: ' + result.summaryCommentUrl] : []),
     ...result.operationalErrors.map((e) => '- ' + e.stage + ': ' + e.message),
     '', 'Raw prompts, model reasoning, and repository snapshots are not uploaded.'].join('\n'));

@@ -172,7 +172,10 @@ export async function runSuggestionCritic(
         { role: 'user', content: user },
       ],
       temperature: 0,
+      phase: 'suggestion-critic',
+      maxTokens: 1024,
     });
+    if (resp.finishReason === 'length') return { verdict: 'uncertain', reason: 'suggestion verification exhausted its output budget' };
     const obj = extractJsonObject(resp.content ?? '');
     const verdict = obj?.verdict;
     if (verdict === 'confirmed' || verdict === 'rejected' || verdict === 'uncertain') {

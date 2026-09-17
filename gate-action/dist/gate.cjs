@@ -50,6 +50,8 @@ var LIMITS = {
   maxDurationMinutesHard: 120,
   /** Default run duration budget in minutes. */
   maxDurationMinutesDefault: 20,
+  /** Local CLI defaults can accommodate slower private inference. */
+  maxDurationMinutesLocalDefault: 60,
   /** Maximum bytes read from a single file. */
   maxFileBytes: 2 * 1024 * 1024,
   /** Maximum lines read from a single file. */
@@ -58,6 +60,12 @@ var LIMITS = {
   maxDiffCharsPerFile: 2e5,
   /** Maximum search results returned per call. */
   maxSearchResults: 200,
+  maxToolResultChars: 16e3,
+  maxSearchSnippetChars: 512,
+  maxReadFileLinesPerCall: 200,
+  transcriptCompactChars: 12e4,
+  maxTranscriptChars: 2e5,
+  maxOutputTokensHard: 16384,
   /** Maximum instruction bytes per file. */
   maxInstructionBytesPerFile: 2e4,
   /** Maximum total instruction bytes. */

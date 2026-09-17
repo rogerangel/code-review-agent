@@ -34,6 +34,7 @@ globalThis.fetch = async (input, options = {}) => {
   if (url.startsWith('http://llm.test')) {
     if (url.endsWith('/models')) return json({ data: [{ id: 'test-model' }] });
     if (scenario.llmError) return json({ error: 'secret echo' }, scenario.llmError);
+    if (body.messages?.[0]?.content === 'Reply with OK only.') return prose('OK');
     if (body.response_format?.json_schema?.name === 'person') return prose('{"name":"Ada","age":36}');
     if (body.tool_choice?.function?.name === 'get_weather') return call('get_weather', { city: 'Paris' });
     if (body.tool_choice === 'none') return prose('It is 17 C.');

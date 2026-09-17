@@ -6,7 +6,7 @@ The reviewer repository is rogerangel/code-review-agent. The remote is already s
 origin git@github.com:rogerangel/code-review-agent.git
 ~~~
 
-At setup time the GitHub repository exists, is public, and is empty; the local branch is main with no commit yet. There is nothing to publish to npm. These steps are for you to run; the implementation does not commit or push automatically.
+The first push has already been completed. The commands below remain a checklist for source updates and future scratch repositories; do not repeat initialization. There is nothing to publish to npm. These steps are for you to run; the implementation does not commit or push automatically.
 
 ## 1. Check and push the reviewer source
 
@@ -46,6 +46,8 @@ git rev-parse HEAD
 
 Keep that last 40-character SHA; it will pin the workflow and reviewer_ref in every caller. Open the GitHub repository's Actions tab and wait for CI to pass.
 
+For subsequent updates, use a descriptive commit message and push your existing branch normally; no new repository or upstream setup is needed.
+
 You do not need git init or git remote add again. If GitHub unexpectedly has another initial commit, stop and reconcile the histories; do not force-push. An SSH authentication failure is separate from the implementation; authenticate the GitHub SSH key used by this remote.
 
 For a future scratch repository, create it empty on GitHub, without an auto-generated README/license/gitignore, before connecting the local history. That step is already done here.
@@ -64,6 +66,8 @@ node dist/cli.js doctor
 
 If vLLM uses a key, set CRA_LLM_API_KEY through your secret manager/environment rather than committing it; include a Bearer header in the curl check. Do not paste key values into PR comments.
 
+On the same private LAN, its LAN address or an existing localhost forward also works; Tailscale is for private connectivity across networks. For slower thinking models, set the operator-owned CRA_LLM_OPTIONS profile in [vLLM setup](setup-vllm.md) before running doctor and review. Doctor checks those explicit settings without silently dropping rejected options.
+
 Doctor tests model discovery, schema output, and an actual native tool → result → follow-up round trip. It exits successfully if at least one supported mode is verified and no operational/separation failure occurred. No parser or model is assumed. See [vLLM setup](setup-vllm.md).
 
 A local dry review needs no GitHub token:
@@ -74,6 +78,8 @@ node /absolute/path/code-review-agent/dist/cli.js review --staged
 ~~~
 
 Use --last-commit or an explicit A...B range if there are no staged changes. The local reviewer does not execute the project's tests and does not post GitHub comments.
+
+Local reviews now default to 60 minutes, with call/file progress and 30-second inference heartbeats on stderr. Use --quiet to suppress progress; --format json keeps stdout machine-readable. GitHub reviews retain the 20-minute default.
 
 ## 3. Configure restricted runner access
 

@@ -23,6 +23,8 @@ jobs:
       reviewer_ref: REVIEWER_COMMIT_SHA
       llm_base_url: 'http://gb10.YOUR-TAILNET.ts.net:8123/v1'
       llm_model: 'YOUR-SERVED-MODEL-ID'
+      # Optional operator-owned JSON; tailor to the actual provider/model:
+      llm_options: '{}'
       tailscale_tags: 'tag:code-review-agent'
       tool_mode: auto
       max_duration_minutes: 20
@@ -59,6 +61,8 @@ The gate checks out only the pinned reviewer code and runs its bundled Node gate
 A local action reference is workspace-relative; simply using ./ after a PR checkout would run the caller's action, not this reviewer. Separate directories prevent that.
 
 The worker pins both base/head from the PR API, recovers shallow merge-base history, reads head-side policy, probes the endpoint, and runs the agent.
+
+llm_options is a trusted caller/Action input, never a repository-policy setting. It supports the same allowlisted generation JSON as the CLI, including opt-in vLLM thinking controls. See [generation settings](setup-vllm.md#operator-generation-settings). GitHub keeps its 20-minute default even though local CLI runs now default to 60.
 
 ## Outputs
 

@@ -7,6 +7,43 @@ import { BudgetTracker, BudgetExceededError } from '../../src/core/review/budget
 afterEach(() => vi.useRealTimers());
 const completion = (message: unknown) => Response.json({ choices: [{ message }] });
 describe('real transport wire protocol', () => {
+  it.each(['reasoning', 'reasoning_content'])('normalizes %s without replaying it or inventing missing usage', async (field) => {
+    const client = new OpenAICompatibleClient({ baseUrl: 'http://local', model: 'm', fetchImpl: async () =>
+      Response.json({ choices: [{ message: { content: 'OK', [field]: 'PRIVATE_REASONING' }, finish_reason: 'stop' }],
+        usage: { completion_tokens: 22, completion_tokens_details: { reasoning_tokens: 20 }, prompt_tokens_details: { cached_tokens: 10 } } }) });
+    const response = await client.chat({ messages: [] });
+    expect(response.reasoning).toBe('PRIVATE_REASONING');
+    expect(response.usage).toMatchObject({ completionTokens: 22, reasoningTokens: 20, cachedPromptTokens: 10 });
+    expect(response.usage?.promptTokens).toBeUndefined();
+  });
+  it('prefers the modern field and serializes only explicit generation parameters', async () => {
+    let request: Record<string, unknown> = {};
+    const client = new OpenAICompatibleClient({ baseUrl: 'http://local', model: 'm', fetchImpl: async (_url, init) => {
+      request = JSON.parse(init?.body as string);
+      return completion({ reasoning: 'modern', reasoning_content: 'legacy' });
+    } });
+    const response = await client.chat({ messages: [], phase: 'review', maxTokens: 2048, thinkingTokenBudget: 1024,
+      chatTemplateKwargs: { enable_thinking: true }, temperature: 1, topP: 0.95, topK: 20, presencePenalty: 0 });
+    expect(response.reasoning).toBe('modern');
+    expect(request).toMatchObject({ max_tokens: 2048, thinking_token_budget: 1024, chat_template_kwargs: { enable_thinking: true }, top_p: 0.95, top_k: 20, presence_penalty: 0 });
+    expect(request).not.toHaveProperty('phase');
+  });
+  it('checks explicitly configured overrides without treating their rejection as capability fallback', async () => {
+    const client = new OpenAICompatibleClient({ baseUrl: 'http://local', model: 'm', fetchImpl: async (_url, init) =>
+      init?.method === 'GET' ? Response.json({ data: [{ id: 'm' }] }) : Response.json({ error: 'SECRET_REQUEST' }, { status: 400 }) });
+    const probe = await probeModel(client, { thinkingTokenBudget: 1024 });
+    expect(probe.fatalError).toContain('configured generation request rejected');
+    expect(() => decideToolMode(probe, 'auto')).toThrow();
+    expect(probe.details.join()).not.toContain('SECRET_REQUEST');
+  });
+  it('does not accept a valid-looking truncated capability response', async () => {
+    const client = new OpenAICompatibleClient({ baseUrl: 'http://local', model: 'm', fetchImpl: async (_url, init) =>
+      init?.method === 'GET' ? Response.json({ data: [{ id: 'm' }] }) : Response.json({ choices: [{ finish_reason: 'length', message: { content: '{"name":"Ada","age":36}',
+        tool_calls: [{ id: 'a', function: { name: 'get_weather', arguments: '{"city":"Paris"}' } }] } }] }) });
+    const probe = await probeModel(client);
+    expect(probe.supportsTools).toBe(false);
+    expect(probe.structuredOk).toBe(false);
+  });
   it('serializes named function choice and assistant/tool follow-up in native wire format', async () => {
     const requests: Record<string, unknown>[] = [];
     const client = new OpenAICompatibleClient({ baseUrl: 'http://local/v1', model: 'local-model',

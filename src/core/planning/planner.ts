@@ -218,7 +218,10 @@ export async function planBatches(params: {
         tools: [PLAN_TOOL_SPEC],
         toolChoice: { function: { name: 'plan_review_batches' } },
         temperature: 0,
+        phase: 'planning',
+        maxTokens: 1024,
       });
+      if (resp.finishReason === 'length') return fallbackPlan(files);
       const call = resp.toolCalls[0];
       if (call && call.name === 'plan_review_batches') {
         try {
@@ -236,7 +239,10 @@ export async function planBatches(params: {
         ],
         jsonSchema: { name: 'plan', schema: PLAN_SCHEMA },
         temperature: 0,
+        phase: 'planning',
+        maxTokens: 1024,
       });
+      if (resp.finishReason === 'length') return fallbackPlan(files);
       doc = extractJsonObject(resp.content ?? '');
     }
     const validated = doc !== null ? validatePlan(doc, eligible) : null;

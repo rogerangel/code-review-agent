@@ -20,6 +20,23 @@ export interface AnswerPayload {
   skippedFiles: { file: string; reason: string }[];
 }
 
+export const completeReviewFileTool: Tool = {
+  spec: specOf(TOOL_NAMES.completeReviewFile),
+  async execute(args, ctx): Promise<ToolResult> {
+    const path = requireString(args, 'path');
+    const summary = requireString(args, 'summary');
+    if (!path || !ctx.batchFiles.includes(path)) return { ok: false, result: null, error: 'path must be a file assigned to this batch' };
+    if (!summary?.trim() || summary.length > 2000) return { ok: false, result: null, error: 'a brief non-empty summary (max 2000 characters) is required' };
+    if (!ctx.diffReads.has(path)) return { ok: false, result: null, error: 'read all diff pages without truncation before completing this file' };
+    ctx.fileCompletions ??= new Map();
+    if (!ctx.fileCompletions.has(path)) {
+      ctx.fileCompletions.set(path, { summary, batchIndex: ctx.postState.batchIndex });
+      ctx.onProgress?.({ type: 'file-completed', file: path, batchIndex: ctx.postState.batchIndex, elapsedMs: ctx.budget.elapsed() });
+    }
+    return { ok: true, result: { path, completed: true } };
+  },
+};
+
 export const completeReviewBatchTool: Tool = {
   spec: specOf(TOOL_NAMES.completeReviewBatch),
   async execute(args, ctx): Promise<ToolResult> {
@@ -39,6 +56,7 @@ export const completeReviewBatchTool: Tool = {
     const all = [...reviewed, ...skips.map((s) => s.file)];
     if (new Set(all).size !== all.length || all.length !== ctx.batchFiles.length || all.some((f) => !ctx.batchFiles.includes(f))) return { ok: false, result: null, error: 'account for every assigned file exactly once; no unknown or duplicate files' };
     if (reviewed.some((f) => !ctx.diffReads.has(f))) return { ok: false, result: null, error: 'read every complete, non-truncated diff before claiming it reviewed; otherwise skip it with a reason' };
+    if (skips.some((item) => ctx.fileCompletions?.has(item.file))) return { ok: false, result: null, error: 'batch disposition contradicts a completed file checkpoint' };
     ctx.batchCompletion = { reviewedFiles: reviewed, skippedFiles: skips };
     return { ok: true, result: { completed: true, ...ctx.batchCompletion } };
   },

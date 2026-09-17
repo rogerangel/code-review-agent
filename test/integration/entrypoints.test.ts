@@ -11,7 +11,7 @@ afterEach(async () => {
   for (const r of handles.splice(0)) await r.dispose();
   for (const file of resultFiles.splice(0)) await fs.rm(file, { force: true });
 });
-async function action(permission: string, options: { inlineError?: number; stale?: boolean } = {}) {
+async function action(permission: string, options: { inlineError?: number; stale?: boolean; llmOptions?: string } = {}) {
   const repo = await makeBranchRepo({
     baseFiles: { 'src/a.ts': 'export const a = 1;\n', 'action.yml': 'runs:\n  using: node24\n  main: evil.cjs\n', 'evil.cjs': 'throw new Error("MALICIOUS_CALLER_EXECUTED");' },
     headFiles: { 'src/a.ts': 'export const a = 1;\nexport const b = a + 1;\n' },
@@ -38,6 +38,7 @@ async function action(permission: string, options: { inlineError?: number; stale
       INPUT_GITHUB_TOKEN: 'test-only', INPUT_LLM_BASE_URL: 'http://llm.test/v1', INPUT_LLM_MODEL: 'test-model',
       INPUT_EXPECTED_HEAD_SHA: options.stale ? 'different-head' : head, INPUT_REPOSITORY_PATH: '.',
       INPUT_FAIL_ON_SEVERITY: 'none', INPUT_TOOL_MODE: 'auto',
+      INPUT_LLM_OPTIONS: options.llmOptions ?? '{}',
     },
   });
   if (child.error) throw child.error;
@@ -80,6 +81,19 @@ describe('standalone Node Action boundaries', () => {
     expect(run.result.status).toBe('partial');
     expect(run.requests.some((r) => r.url.startsWith('http://llm.test'))).toBe(false);
   });
+  it('forwards operator generation settings to probes and capped inference without changing the GitHub duration default', async () => {
+    const run = await action('write', { llmOptions: JSON.stringify({ max_output_tokens: 4096, thinking_token_budget: 1024,
+      chat_template_kwargs: { enable_thinking: true }, temperature: 1, top_p: 0.95, top_k: 20, presence_penalty: 0.2 }) });
+    expect(run.child.status, run.child.stderr).toBe(0);
+    const calls = run.requests.filter((r) => r.url.endsWith('/chat/completions'));
+    expect(calls.every((r) => r.body.temperature === 1 && r.body.top_p === 0.95 && r.body.top_k === 20 && r.body.presence_penalty === 0.2)).toBe(true);
+    expect(calls.every((r) => r.body.chat_template_kwargs.enable_thinking === true && r.body.thinking_token_budget <= r.body.max_tokens / 2)).toBe(true);
+    const review = calls.find((r) => r.body.tools?.some((tool: { function: { name: string } }) => tool.function.name === 'read_diff'));
+    expect(review.body).toMatchObject({ max_tokens: 4096, thinking_token_budget: 1024 });
+    const metadata = parse(await fs.readFile('action.yml', 'utf8'));
+    expect(String(metadata.inputs.max_duration_minutes.default)).toBe('20');
+    expect(metadata.inputs.llm_options.default).toBe('{}');
+  });
 });
 describe('reusable workflow executable source and permissions', () => {
   it('checks out trusted reviewer code separately from caller data and gates tailnet access', async () => {
@@ -100,6 +114,9 @@ describe('reusable workflow executable source and permissions', () => {
     expect(review.steps.find((s: { id?: string }) => s.id === 'review').uses).toBe('./reviewer');
     expect(workflow.on.workflow_call.secrets.llm_api_key).toBeDefined();
     expect(workflow.on.workflow_call.outputs.coverage_json.value).toContain('jobs.review.outputs.coverage_json');
+    expect(workflow.on.workflow_call.inputs.llm_options.default).toBe('{}');
+    expect(review.steps.find((s: { id?: string }) => s.id === 'review').with.llm_options).toBe('${{ inputs.llm_options }}');
+    expect(workflow.on.workflow_call.inputs.max_duration_minutes.default).toBe(20);
     for (const step of [...gate.steps, ...review.steps]) if (step.uses && !step.uses.startsWith('./')) expect(step.uses).toMatch(/@[0-9a-f]{40}$/);
   });
 });
@@ -122,7 +139,29 @@ describe('CLI entrypoint', () => {
       const result = JSON.parse(child.stdout);
       expect(result.status).toBe(llmError ? 'failed' : 'findings');
       expect(JSON.parse(await fs.readFile(output, 'utf8'))).toEqual(result);
+      expect(child.stderr).not.toMatch(/\[review\] (llm|completed|compaction)/);
       if (!llmError) expect(result.findings[0].delivery).toBe('local');
+    });
+  }
+  for (const flagOverride of [false, true]) {
+    it(flagOverride ? 'gives --llm-options precedence over the environment and suppresses progress with --quiet' : 'applies CRA_LLM_OPTIONS in the packaged CLI', async () => {
+      const repo = await makeBranchRepo({ baseFiles: { 'src/a.ts': 'export const a = 1;\n' }, headFiles: { 'src/a.ts': 'export const a = 1;\nexport const b = a + 1;\n' } });
+      handles.push(repo);
+      await fs.writeFile(path.join(repo.dir, 'scenario.json'), '{}');
+      const log = path.join(repo.dir, 'http.jsonl');
+      const args = ['--import', path.resolve('test/helpers/entry-preload.mjs'), path.resolve('dist/cli.js'), 'review', 'main...feature', '--quiet'];
+      if (flagOverride) args.push('--llm-options', '{"max_output_tokens":4096,"temperature":1}');
+      const child = spawnSync('node', args, { cwd: repo.dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env,
+        CRA_TEST_SCENARIO: path.join(repo.dir, 'scenario.json'), CRA_TEST_HTTP_LOG: log,
+        CRA_LLM_BASE_URL: 'http://llm.test/v1', CRA_LLM_MODEL: 'test-model',
+        CRA_LLM_OPTIONS: '{"max_output_tokens":1024,"temperature":0.7}',
+      } });
+      expect(child.status, child.stderr).toBe(0);
+      expect(child.stderr).toBe('');
+      const calls = (await fs.readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+      const review = calls.find((r) => r.body?.tools?.some((tool: { function: { name: string } }) => tool.function.name === 'read_diff'));
+      expect(review.body).toMatchObject({ max_tokens: flagOverride ? 4096 : 1024, temperature: flagOverride ? 1 : 0.7 });
+      expect(child.stdout).toContain('code-review-agent');
     });
   }
 });
